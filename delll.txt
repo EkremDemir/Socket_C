@@ -1,0 +1,253 @@
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <pthread.h>
+#include <stdatomic.h>
+
+
+#define BUFFER_SIZE 10 // Size of the circular buffer
+#define MESSAGE_LEN 25 // Maximum message length
+#define SHM_NAME "/circular_buffer_shm" // Shared memory name
+
+typedef struct {
+    atomic_int write_index; // Atomic write index
+    int read_index; // Read index (non-atomic for simplicity)
+    char messages[BUFFER_SIZE][MESSAGE_LEN]; // Message storage
+} CircularBuffer;
+
+
+
+
+
+
+
+
+pthread_t threads[2]; // Threads for message production
+pthread_t exit_thread; // Thread for exit detection
+int running = 1; // Flag to control thread execution
+
+// Shared buffer pointer
+CircularBuffer *shared_buffer;
+
+// Function to generate a fake message and write it to shared memory
+void *produce_messages(void *arg) {
+    int thread_id = *(int *)arg;
+    
+    for (int i = 0; running; i++) {
+        usleep(1000);
+        char message[MESSAGE_LEN];
+        snprintf(message, MESSAGE_LEN, "Thread %d: Message %d", thread_id, i);
+
+        
+        // Check buffer state
+        int current_write_index = atomic_load(&shared_buffer->write_index);
+        int next_index = (current_write_index + 1) % BUFFER_SIZE;
+
+        if (next_index == shared_buffer->read_index) {
+            //printf("Thread %d: Buffer is full. Waiting...\n", thread_id);
+            //sleep(1); // Simulate waiting when the buffer is full
+            i--;
+            continue;
+        }
+
+        // Write the message to the buffer
+        strncpy(shared_buffer->messages[current_write_index], message, MESSAGE_LEN);
+        printf("Thread %d produced: %s\n", thread_id, shared_buffer->messages[current_write_index]);
+
+        // Atomically update the write index
+        atomic_store(&shared_buffer->write_index, next_index);
+
+        //sleep(1); // Simulate delay
+    }
+
+    return NULL;
+}
+
+// Function to detect Enter key press and terminate the program
+void *detect_exit(void *arg) {
+    printf("Press Enter to terminate the program...\n");
+    getchar(); // Wait for user to press Enter
+    running = 0; // Set running flag to 0 to terminate threads
+    return NULL;
+}
+
+int main() {
+    int shm_fd;
+
+    // Step 1: Create shared memory
+    shm_fd = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0666);
+    if (shm_fd == -1) {
+        perror("shm_open failed");
+        exit(EXIT_FAILURE);
+    }
+
+    // Step 2: Set shared memory size
+    if (ftruncate(shm_fd, sizeof(CircularBuffer)) == -1) {
+        perror("ftruncate failed");
+        exit(EXIT_FAILURE);
+    }
+
+    // Step 3: Map shared memory
+    shared_buffer = mmap(NULL, sizeof(CircularBuffer), PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
+    if (shared_buffer == MAP_FAILED) {
+        perror("mmap failed");
+        exit(EXIT_FAILURE);
+    }
+
+    // Step 4: Initialize the circular buffer
+    atomic_store(&shared_buffer->write_index, 0);
+    shared_buffer->read_index = 0;
+
+    // Step 5: Create producer threads
+    int thread_ids[2] = {1, 2}; // Thread identifiers
+    for (int i = 0; i < 2; i++) {
+        if (pthread_create(&threads[i], NULL, produce_messages, &thread_ids[i]) != 0) {
+            perror("pthread_create failed");
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    // Step 6: Create exit detection thread
+    if (pthread_create(&exit_thread, NULL, detect_exit, NULL) != 0) {
+        perror("pthread_create for exit detection failed");
+        exit(EXIT_FAILURE);
+    }
+
+    // Step 7: Wait for threads to finish
+    pthread_join(exit_thread, NULL); // Wait for the exit thread to complete
+    for (int i = 0; i < 2; i++) {
+        pthread_join(threads[i], NULL);
+    }
+
+    // Cleanup
+    munmap(shared_buffer, sizeof(CircularBuffer));
+    shm_unlink(SHM_NAME);
+
+    printf("Program terminated.\n");
+    return 0;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <pthread.h>
+#include <stdatomic.h>
+#include <signal.h>
+
+#define BUFFER_SIZE 10       // Number of messages
+#define MESSAGE_LEN 25       // Length of each message
+#define SHM_NAME "/circular_buffer_shm" // Shared memory name
+
+pthread_t exit_thread; // Thread for exit detection
+int running = 1; // Flag to control thread execution
+
+typedef struct {
+    atomic_int write_index;      // Atomic index for writing messages
+    int read_index;              // Index for reading messages
+    char messages[BUFFER_SIZE][MESSAGE_LEN]; // Circular buffer storage
+} CircularBuffer;
+
+// Function to detect Enter key press and terminate the program
+void *detect_exit(void *arg) {
+    printf("Press Enter to terminate the program...\n");
+    getchar(); // Wait for user to press Enter
+    running = 0; // Set running flag to 0 to terminate threads
+    return NULL;
+}
+
+int main() {
+    CircularBuffer *shared_buffer;
+    int shm_fd;
+
+    // Step 1: Open shared memory
+    shm_fd = shm_open(SHM_NAME, O_RDWR, 0666);
+    if (shm_fd == -1) {
+        perror("shm_open failed");
+        exit(EXIT_FAILURE);
+    }
+
+    // Step 2: Map shared memory
+    shared_buffer = (CircularBuffer *)mmap(NULL, sizeof(CircularBuffer), PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
+    if (shared_buffer == MAP_FAILED) {
+        perror("mmap failed");
+        exit(EXIT_FAILURE);
+    }
+
+    // Step 3: Create exit detection thread
+    if (pthread_create(&exit_thread, NULL, detect_exit, NULL) != 0) {
+        perror("pthread_create for exit detection failed");
+        exit(EXIT_FAILURE);
+    }
+
+    // Step 4: Consume messages
+    while (running) {
+        // Atomically read the write index
+        int current_write_index = atomic_load(&shared_buffer->write_index);
+
+        // Check if the buffer is empty
+        if (shared_buffer->read_index == current_write_index) {
+            //printf("Buffer is empty. Waiting...\n");
+            //sleep(1); // Simulate waiting
+            continue;
+        }
+
+        // Consume the message
+        printf("Consumed: %s\n", shared_buffer->messages[shared_buffer->read_index]);
+
+        // Update read index (non-atomic since only the consumer modifies it)
+        shared_buffer->read_index = (shared_buffer->read_index + 1) % BUFFER_SIZE;
+
+        //sleep(1); // Simulate processing delay
+    }
+
+    // Wait for exit thread to complete
+    pthread_join(exit_thread, NULL);
+
+    // Cleanup
+    munmap(shared_buffer, sizeof(CircularBuffer));
+    close(shm_fd);
+
+    printf("Consumer terminated.\n");
+    return 0;
+}
+
+
+
+
+
+
+
+
+
+
