@@ -780,3 +780,169 @@ int main(int argc, char **argv) {
 }
 
 
+
+
+
+
+
+
+
+#include <iostream>
+#include <vector>
+#include <stdexcept>
+#include <cmath>
+
+template <typename T>
+class MatrixOperations {
+public:
+    // Matrix Addition
+    static std::vector<std::vector<T>> add(const std::vector<std::vector<T>>& mat1, const std::vector<std::vector<T>>& mat2) {
+        checkSameDimensions(mat1, mat2);
+        std::vector<std::vector<T>> result = mat1;
+        for (size_t i = 0; i < mat1.size(); ++i) {
+            for (size_t j = 0; j < mat1[i].size(); ++j) {
+                result[i][j] += mat2[i][j];
+            }
+        }
+        return result;
+    }
+
+    // Matrix Subtraction
+    static std::vector<std::vector<T>> subtract(const std::vector<std::vector<T>>& mat1, const std::vector<std::vector<T>>& mat2) {
+        checkSameDimensions(mat1, mat2);
+        std::vector<std::vector<T>> result = mat1;
+        for (size_t i = 0; i < mat1.size(); ++i) {
+            for (size_t j = 0; j < mat1[i].size(); ++j) {
+                result[i][j] -= mat2[i][j];
+            }
+        }
+        return result;
+    }
+
+    // Matrix Multiplication
+    static std::vector<std::vector<T>> multiply(const std::vector<std::vector<T>>& mat1, const std::vector<std::vector<T>>& mat2) {
+        if (mat1[0].size() != mat2.size()) {
+            throw std::invalid_argument("Invalid dimensions for matrix multiplication.");
+        }
+        std::vector<std::vector<T>> result(mat1.size(), std::vector<T>(mat2[0].size(), 0));
+        for (size_t i = 0; i < mat1.size(); ++i) {
+            for (size_t j = 0; j < mat2[0].size(); ++j) {
+                for (size_t k = 0; k < mat1[0].size(); ++k) {
+                    result[i][j] += mat1[i][k] * mat2[k][j];
+                }
+            }
+        }
+        return result;
+    }
+
+    // Matrix Transpose
+    static std::vector<std::vector<T>> transpose(const std::vector<std::vector<T>>& mat) {
+        std::vector<std::vector<T>> result(mat[0].size(), std::vector<T>(mat.size()));
+        for (size_t i = 0; i < mat.size(); ++i) {
+            for (size_t j = 0; j < mat[i].size(); ++j) {
+                result[j][i] = mat[i][j];
+            }
+        }
+        return result;
+    }
+
+    // Scalar Multiplication
+    static std::vector<std::vector<T>> scalarMultiply(const std::vector<std::vector<T>>& mat, T scalar) {
+        std::vector<std::vector<T>> result = mat;
+        for (size_t i = 0; i < mat.size(); ++i) {
+            for (size_t j = 0; j < mat[i].size(); ++j) {
+                result[i][j] *= scalar;
+            }
+        }
+        return result;
+    }
+
+    // Element-wise Multiplication (Hadamard Product)
+    static std::vector<std::vector<T>> elementWiseMultiply(const std::vector<std::vector<T>>& mat1, const std::vector<std::vector<T>>& mat2) {
+        checkSameDimensions(mat1, mat2);
+        std::vector<std::vector<T>> result = mat1;
+        for (size_t i = 0; i < mat1.size(); ++i) {
+            for (size_t j = 0; j < mat1[i].size(); ++j) {
+                result[i][j] *= mat2[i][j];
+            }
+        }
+        return result;
+    }
+
+    // Determinant (for square matrices)
+    static T determinant(const std::vector<std::vector<T>>& mat) {
+        checkSquareMatrix(mat);
+        if (mat.size() == 1) {
+            return mat[0][0];
+        }
+        if (mat.size() == 2) {
+            return mat[0][0] * mat[1][1] - mat[0][1] * mat[1][0];
+        }
+        T det = 0;
+        for (size_t i = 0; i < mat[0].size(); ++i) {
+            det += (i % 2 == 0 ? 1 : -1) * mat[0][i] * determinant(minorMatrix(mat, 0, i));
+        }
+        return det;
+    }
+
+    // Matrix Inversion (for square matrices)
+    static std::vector<std::vector<T>> inverse(const std::vector<std::vector<T>>& mat) {
+        checkSquareMatrix(mat);
+        T det = determinant(mat);
+        if (std::abs(det) < 1e-9) {
+            throw std::invalid_argument("Matrix is singular and cannot be inverted.");
+        }
+        if (mat.size() == 1) {
+            return {{1 / mat[0][0]}};
+        }
+        std::vector<std::vector<T>> adj(mat.size(), std::vector<T>(mat.size()));
+        for (size_t i = 0; i < mat.size(); ++i) {
+            for (size_t j = 0; j < mat.size(); ++j) {
+                adj[j][i] = (i + j % 2 == 0 ? 1 : -1) * determinant(minorMatrix(mat, i, j));
+            }
+        }
+        return scalarMultiply(adj, 1 / det);
+    }
+
+private:
+    // Helper: Check if two matrices have the same dimensions
+    static void checkSameDimensions(const std::vector<std::vector<T>>& mat1, const std::vector<std::vector<T>>& mat2) {
+        if (mat1.size() != mat2.size() || mat1[0].size() != mat2[0].size()) {
+            throw std::invalid_argument("Matrices must have the same dimensions.");
+        }
+    }
+
+    // Helper: Check if the matrix is square
+    static void checkSquareMatrix(const std::vector<std::vector<T>>& mat) {
+        if (mat.size() != mat[0].size()) {
+            throw std::invalid_argument("Matrix must be square.");
+        }
+    }
+
+    // Helper: Calculate minor matrix for determinant calculation
+    static std::vector<std::vector<T>> minorMatrix(const std::vector<std::vector<T>>& mat, size_t row, size_t col) {
+        std::vector<std::vector<T>> minor;
+        for (size_t i = 0; i < mat.size(); ++i) {
+            if (i == row) continue;
+            std::vector<T> minorRow;
+            for (size_t j = 0; j < mat[i].size(); ++j) {
+                if (j == col) continue;
+                minorRow.push_back(mat[i][j]);
+            }
+            minor.push_back(minorRow);
+        }
+        return minor;
+    }
+};
+
+// Helper to print a matrix
+template <typename T>
+void printMatrix(const std::vector<std::vector<T>>& mat) {
+    for (const auto& row : mat) {
+        for (const auto& elem : row) {
+            std::cout << elem << " ";
+        }
+        std::cout << "\n";
+    }
+    std::cout << "\n";
+}
