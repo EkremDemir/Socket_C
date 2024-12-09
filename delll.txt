@@ -946,3 +946,247 @@ void printMatrix(const std::vector<std::vector<T>>& mat) {
     }
     std::cout << "\n";
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <unistd.h>      // For usleep
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <pthread.h>
+#include <stdatomic.h>
+#include <stdint.h>       // For uint64_t
+#include <time.h>
+
+#define BUFFER_SIZE 10000
+#define THREADNUM 20
+#define MESSAGE_LEN 100
+#define SHM_NAME "/circular_buffer_shm"
+
+typedef struct {
+    _Atomic uint64_t write_index; // 64-bit Atomic write index
+    _Atomic uint64_t read_index;  // 64-bit Atomic read index
+    char messages[BUFFER_SIZE][MESSAGE_LEN];
+} CircularBuffer;
+
+_Atomic uint64_t message_counter;
+_Atomic uint64_t message_counter2;
+_Atomic int running;  // This can remain int since we only use 0/1, but atomic is fine
+
+pthread_t threads[THREADNUM];
+pthread_t consumer_thread;
+pthread_t exit_thread;
+
+CircularBuffer *shared_buffer;
+
+void delay_ms(unsigned int ms) {
+    usleep(ms * 1000);
+}
+
+int check_data_size(char *data) {
+    int cnt = 0;
+    while (data[cnt] != '\0') {
+        if (cnt >= MESSAGE_LEN) {
+            return -1;
+        }
+        ++cnt;
+    }
+    return cnt;
+}
+
+void send_log(char *data) {
+    int data_len = check_data_size(data);
+    if (data_len == -1) {
+        printf("ERROR: Data size overflow!\n");
+        return;
+    }
+
+    uint64_t current_write_index = atomic_fetch_add(&shared_buffer->write_index, 1);
+    uint64_t next_write_index = current_write_index + 1;
+
+    uint64_t current_read_index = atomic_load(&shared_buffer->read_index);
+
+    if ((next_write_index - current_read_index) > BUFFER_SIZE) {
+        atomic_fetch_add(&shared_buffer->read_index, 1);
+    }
+
+    uint64_t pos = current_write_index % BUFFER_SIZE;
+    snprintf(shared_buffer->messages[pos], MESSAGE_LEN,
+             "Producer message: %s | WriteIndex: %lu", data, (unsigned long)current_write_index);
+    atomic_fetch_add(&message_counter2, 1);
+}
+
+void *producer_thread_function(void *arg) {
+    int id = *(int*)arg;
+    uint64_t counter = 0;
+    char data[250] = {};
+    while (atomic_load(&running)) {
+        snprintf(data, sizeof(data), "Thread %d message: %lu", id, (unsigned long)counter);
+        send_log(data);
+        atomic_fetch_add(&message_counter, 1);
+        ++counter;
+    }
+    return NULL;
+}
+
+void *consumer_thread_function(void *arg) {
+    while (1) {
+        uint64_t w = atomic_load(&shared_buffer->write_index);
+        uint64_t r = atomic_load(&shared_buffer->read_index);
+
+        if (r < w) {
+            uint64_t pos = r % BUFFER_SIZE;
+            printf("Consumer read: %s | RIndex: %lu | WIndex: %lu\n",
+                   shared_buffer->messages[pos], (unsigned long)r, (unsigned long)w);
+            atomic_fetch_add(&shared_buffer->read_index, 1);
+        } else {
+            if (!atomic_load(&running)) {
+                if (atomic_load(&shared_buffer->read_index) == atomic_load(&shared_buffer->write_index)) {
+                    break;
+                }
+            }
+            delay_ms(1);
+        }
+    }
+
+    return NULL;
+}
+
+void *detect_exit(void *arg) {
+    getchar();
+    atomic_store(&running, 0);
+    return NULL;
+}
+
+int main() {
+    int shm_fd;
+
+    shm_fd = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0666);
+    if (shm_fd == -1) {
+        perror("shm_open failed");
+        exit(EXIT_FAILURE);
+    }
+
+    if (ftruncate(shm_fd, sizeof(CircularBuffer)) == -1) {
+        perror("ftruncate failed");
+        exit(EXIT_FAILURE);
+    }
+
+    shared_buffer = mmap(NULL, sizeof(CircularBuffer), PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
+    if (shared_buffer == MAP_FAILED) {
+        perror("mmap failed");
+        exit(EXIT_FAILURE);
+    }
+
+    atomic_store(&message_counter, 0);
+    atomic_store(&message_counter2, 0);
+    atomic_store(&shared_buffer->write_index, 0);
+    atomic_store(&shared_buffer->read_index, 0);
+    atomic_store(&running, 1);
+
+    int thread_ids[THREADNUM];
+    for (int i = 0; i < THREADNUM; ++i) {
+        thread_ids[i] = i + 1;
+        if (pthread_create(&threads[i], NULL, producer_thread_function, &thread_ids[i]) != 0) {
+            perror("pthread_create failed");
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    if (pthread_create(&consumer_thread, NULL, consumer_thread_function, NULL) != 0) {
+        perror("pthread_create for consumer failed");
+        exit(EXIT_FAILURE);
+    }
+
+    if (pthread_create(&exit_thread, NULL, detect_exit, NULL) != 0) {
+        perror("pthread_create for exit detection failed");
+        exit(EXIT_FAILURE);
+    }
+
+    pthread_join(exit_thread, NULL);
+
+    for (int i = 0; i < THREADNUM; i++) {
+        pthread_join(threads[i], NULL);
+    }
+
+    pthread_join(consumer_thread, NULL);
+
+    uint64_t final_write_index = atomic_load(&shared_buffer->write_index);
+    uint64_t final_read_index = atomic_load(&shared_buffer->read_index);
+
+    printf("Number of messages attempted to write: %lu\n", (unsigned long)atomic_load(&message_counter));
+    printf("Number of messages actually written: %lu\n", (unsigned long)atomic_load(&message_counter2));
+    printf("Final Write Index: %lu\n", (unsigned long)final_write_index);
+    printf("Final Read Index: %lu\n", (unsigned long)final_read_index);
+
+    munmap(shared_buffer, sizeof(CircularBuffer));
+    shm_unlink(SHM_NAME);
+
+    return 0;
+}
+
