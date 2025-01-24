@@ -1709,3 +1709,61 @@ int main()
     return 0;
 }
 
+
+
+
+
+
+
+#include <vxWorks.h>
+#include <stdio.h>
+#include <ioLib.h>
+#include <taskLib.h>
+#include <fcntl.h>   /* For O_CREAT, O_WRONLY, etc. */
+
+STATUS redirectPrintfToFile(void)
+{
+    int fd;
+    int oldStdOut;
+
+    /* Open or create the file for writing. 
+       O_CREAT creates the file if it doesn’t exist, and O_TRUNC 
+       will truncate it to zero length if it does. */
+    fd = open("myOutput.txt", O_CREAT | O_WRONLY | O_TRUNC, 0666);
+    if (fd == ERROR)
+    {
+        printf("Error opening file.\n");
+        return ERROR;
+    }
+
+    /* Save the old global STD_OUT fd in case you want to restore it later. */
+    oldStdOut = ioGlobalStdGet(STD_OUT);
+
+    /* Redirect STD_OUT to the file descriptor. */
+    if (ioGlobalStdSet(STD_OUT, fd) == ERROR)
+    {
+        printf("Error redirecting stdout.\n");
+        close(fd);
+        return ERROR;
+    }
+
+    /* Now any call to printf will go into "myOutput.txt". */
+    printf("Hello, this will be in myOutput.txt!\n");
+    printf("We are currently redirecting stdout.\n");
+
+    /* (Optional) Restore the original stdout (the console, typically). */
+    if (ioGlobalStdSet(STD_OUT, oldStdOut) == ERROR)
+    {
+        printf("Error restoring original stdout.\n");
+        close(fd);
+        return ERROR;
+    }
+
+    /* Close the file. */
+    close(fd);
+
+    /* Now prints will again go to the console. */
+    printf("Back to the console.\n");
+
+    return OK;
+}
