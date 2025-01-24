@@ -1629,3 +1629,83 @@ int main() {
 
     return 0;
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+#include <iostream>
+#include <cstdio>      // For printf, freopen, tmpfile, etc.
+#include <string>
+#include <cstring>     // For strlen (if needed, not strictly here)
+#include <stdexcept>   // For std::runtime_error (if needed)
+#include <cstdlib>     // For std::tmpfile (ISO C)
+
+int main()
+{
+    // 1) Create a temporary file to capture all stdout output.
+    //    tmpfile() gives us an unnamed, temporary file opened in "wb+" mode.
+    //    On success, we have a valid FILE* that we can both write and read.
+    FILE* tempFile = std::tmpfile();
+    if (!tempFile) {
+        std::cerr << "Failed to create a temporary file for capturing.\n";
+        return 1;
+    }
+
+    // 2) Save the old stdout so we can restore it later.
+    //    This is a pointer to the same FILE structure that 'stdout' is currently using.
+    FILE* oldStdout = stdout;
+
+    // 3) Redirect 'stdout' to our temporary file.
+    //    In many implementations, 'std::cout' will also now write into tempFile,
+    //    but this is not 100% guaranteed by the standard. Usually it works.
+    stdout = tempFile;
+
+    // ---- BEGIN CAPTURE ----
+    // All these writes should go into tempFile instead of the real console.
+    printf("Hello from printf!\n");
+    std::cout << "Hello from std::cout! This is valid output.\n";
+
+    // Flush both C and C++ buffers to ensure everything is physically written to tempFile.
+    fflush(stdout);        // flush the C library buffer
+    std::cout.flush();     // flush the C++ iostream buffer
+    // ---- END CAPTURE ----
+
+    // 4) Restore the real stdout.
+    stdout = oldStdout;
+
+    // 5) Now we want to read from the temporary file the data that was captured.
+    //    First, we must rewind the file pointer to the start.
+    std::fseek(tempFile, 0, SEEK_SET);
+
+    // Read everything from tempFile into a std::string.
+    std::string captured;
+    {
+        char buffer[1024];
+        while (std::fgets(buffer, sizeof(buffer), tempFile)) {
+            captured += buffer;
+        }
+    }
+
+    // 6) Close the temporary file. We now have the entire captured output in 'captured'.
+    std::fclose(tempFile);
+
+    // 7) Check if the captured text contains "valid".
+    if (captured.find("valid") != std::string::npos) {
+        // It contains "valid", so print it to the (real) console.
+        std::cout << captured;
+    } else {
+        std::cout << "The captured output did NOT contain 'valid'.\n";
+    }
+
+    return 0;
+}
+
