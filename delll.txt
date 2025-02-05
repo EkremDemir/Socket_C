@@ -1767,3 +1767,129 @@ STATUS redirectPrintfToFile(void)
 
     return OK;
 }
+
+
+
+
+
+/******************************************************************************
+ * File: benchmarkPerf.c
+ *
+ * Description:
+ *   Demonstrates how to measure elapsed time in nanoseconds for a function
+ *   called "performancePd()" using a user-provided "getimenano()" function.
+ *   Results are shown in a simple table.
+ *
+ * Usage Steps:
+ *   1. Provide your own implementations (or declarations) of:
+ *      - uint64_t getimenano(void);
+ *      - void performancePd(void);
+ *   2. Compile/link this file in your environment (VxWorks or otherwise).
+ *   3. Call benchmarkPerformancePd(<iterations>) to run the test.
+ ******************************************************************************/
+
+#include <stdio.h>    /* printf */
+#include <stdint.h>   /* uint64_t */
+#include <stdlib.h>   /* malloc, free */
+
+/* 
+ * Declare your existing functions so the compiler knows about them.
+ * These must be defined elsewhere in your project.
+ */
+extern uint64_t getimenano(void);
+extern void performancePd(void);
+
+/**
+ * benchmarkPerformancePd:
+ *   - Runs 'performancePd()' for the specified number of iterations.
+ *   - Uses getimenano() before and after each call to measure elapsed time.
+ *   - Prints individual times and basic stats (min, max, average).
+ */
+void benchmarkPerformancePd(int iterations)
+{
+    if (iterations <= 0)
+    {
+        printf("Error: iterations must be > 0.\n");
+        return;
+    }
+
+    /* Allocate array to hold each measurement */
+    uint64_t *measurements = (uint64_t *)malloc(sizeof(uint64_t) * iterations);
+    if (measurements == NULL)
+    {
+        printf("Error: could not allocate memory for measurements.\n");
+        return;
+    }
+
+    printf("\n========================================\n");
+    printf("     Benchmarking performancePd()       \n");
+    printf("   (Using getimenano() for timing)      \n");
+    printf("========================================\n");
+    printf(" Iteration |   Elapsed time (ns)\n");
+    printf("----------------------------------------\n");
+
+    for (int i = 0; i < iterations; i++)
+    {
+        /* Record start time in nanoseconds */
+        uint64_t startTime = getimenano();
+
+        /* Call the function we’re measuring */
+        performancePd();
+
+        /* Record end time in nanoseconds */
+        uint64_t endTime = getimenano();
+
+        /* Elapsed time for this iteration */
+        measurements[i] = endTime - startTime;
+
+        /* Print result for this iteration */
+        printf(" %9d | %llu\n", i + 1, (unsigned long long)measurements[i]);
+    }
+
+    /* Compute min, max, and average */
+    uint64_t sum = 0;
+    uint64_t minTime = (uint64_t)-1;  /* Start with large number (all bits = 1) */
+    uint64_t maxTime = 0;
+    for (int i = 0; i < iterations; i++)
+    {
+        uint64_t val = measurements[i];
+        sum += val;
+        if (val < minTime) { minTime = val; }
+        if (val > maxTime) { maxTime = val; }
+    }
+    double avgTime = (double)sum / (double)iterations;
+
+    printf("----------------------------------------\n");
+    printf(" Min time (ns):  %llu\n", (unsigned long long)minTime);
+    printf(" Max time (ns):  %llu\n", (unsigned long long)maxTime);
+    printf(" Avg time (ns):  %.2f\n", avgTime);
+    printf("========================================\n\n");
+
+    free(measurements);
+}
+
+/******************************************************************************
+ * Example placeholders for getimenano() and performancePd().
+ * Remove or replace these stubs with your real implementations!
+ ******************************************************************************/
+#if 0  /* REMOVE or comment out if you already have actual definitions elsewhere */
+
+/* Example (dummy) getimenano() - returns a monotonic counter in ns */
+uint64_t getimenano(void)
+{
+    static uint64_t dummyCounter = 0;
+    dummyCounter += 1234567; /* increment by 1.234567 ms worth of ns for example */
+    return dummyCounter;
+}
+
+/* Example (dummy) performancePd() - some short workload */
+void performancePd(void)
+{
+    volatile int sum = 0;
+    for (int i = 0; i < 1000; i++)
+    {
+        sum += i;
+    }
+}
+
+#endif
