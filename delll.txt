@@ -2251,5 +2251,295 @@ void RunAll() {
 
 } // namespace Abench
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/*
+#include <iostream>
+#include <functional>
+#include <vector>
+#include <string>
+#include <algorithm>
+#include <numeric>
+#include <cmath>
+#include <cstdint>
+#include <x86intrin.h> // For __rdtsc intrinsic
+
+#define CPU_FREQ 3.0e9 // Adjust this to your CPU frequency in Hz
+#define GET_TIME() __rdtsc()
+
+struct BenchmarkInfo {
+    std::string name;
+    std::function<void()> func;
+    size_t iterations;
+};
+
+class BenchmarkRunner {
+private:
+    std::vector<BenchmarkInfo> benchmarks;
+
+public:
+    static BenchmarkRunner& instance() {
+        static BenchmarkRunner runner;
+        return runner;
+    }
+
+    void registerBenchmark(const std::string& name, std::function<void()> func, size_t iterations = 1000) {
+        benchmarks.push_back({name, func, iterations});
+    }
+
+    void runAll() {
+        for (const auto& b : benchmarks) {
+            std::vector<double> times;
+            for (size_t i = 0; i < b.iterations; ++i) {
+                uint64_t start = GET_TIME();
+                b.func();
+                uint64_t end = GET_TIME();
+                double time_ns = (end - start) * (1.0e9 / CPU_FREQ);
+                times.push_back(time_ns);
+            }
+
+            double min_time = *std::min_element(times.begin(), times.end());
+            double max_time = *std::max_element(times.begin(), times.end());
+            double mean = std::accumulate(times.begin(), times.end(), 0.0) / times.size();
+            double sum_of_squares = std::accumulate(times.begin(), times.end(), 0.0, 
+                [mean](double sum, double t) { return sum + (t - mean) * (t - mean); });
+            double stddev = std::sqrt(sum_of_squares / times.size());
+
+            std::cout << "Benchmark [" << b.name << "]:\n";
+            std::cout << "  Min: " << min_time << " ns\n";
+            std::cout << "  Max: " << max_time << " ns\n";
+            std::cout << "  Mean: " << mean << " ns\n";
+            std::cout << "  Std Dev: " << stddev << " ns\n";
+        }
+    }
+};
+
+#define EKO_BENCHMARK(name, func, iters) \
+    static void _benchmark_##name() { func; } \
+    static int _register_##name = (BenchmarkRunner::instance().registerBenchmark(#name, _benchmark_##name, iters), 0);
+
+// Example benchmark functions
+void example1() {
+    volatile int x = 0;
+    for (int i = 0; i < 1000; ++i) x += i;
+}
+
+void example2() {
+    volatile int y = 1;
+    for (int i = 0; i < 1000; ++i) y *= 2;
+}
+
+EKO_BENCHMARK(Example_Addition, example1(), 1000)
+EKO_BENCHMARK(Example_Multiplication, example2(), 1000)
+
+int main() {
+    BenchmarkRunner::instance().runAll();
+    return 0;
+}
+*/
+
+
+/*
+#include <iostream>
+#include <chrono>
+#include <vector>
+#include <algorithm>
+#include <numeric>
+
+class State {
+public:
+    // Constructor: set up 'count' and reserve space in durations
+    explicit State(int n) : count(n)
+    {
+        durations.reserve(n);
+    }
+
+    // Proxy object that measures the time of a single loop iteration
+    struct TimerProxy {
+        // Start timing as soon as this is constructed
+        TimerProxy(std::vector<double>& dur)
+            : start(std::chrono::high_resolution_clock::now()), durationsRef(dur)
+        {
+        }
+
+        // Stop timing in the destructor, which is called automatically
+        // when the iteration scope ends
+        ~TimerProxy()
+        {
+            auto end = std::chrono::high_resolution_clock::now();
+            auto elapsedUs =
+                std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+            durationsRef.push_back(static_cast<double>(elapsedUs));
+        }
+
+    private:
+        std::chrono::time_point<std::chrono::high_resolution_clock> start;
+        std::vector<double>& durationsRef;
+    };
+
+    // Custom iterator for range-based for
+    class Iterator {
+    public:
+        Iterator(int index, State& s) : idx(index), stateRef(s) {}
+
+        // Compare index to end
+        bool operator!=(const Iterator& other) const {
+            return idx != other.idx;
+        }
+
+        // Advance the iterator
+        Iterator& operator++() {
+            ++idx;
+            return *this;
+        }
+
+        // Dereference: create and return a TimerProxy object
+        // Each iteration in the loop will construct a TimerProxy
+        TimerProxy operator*() {
+            return TimerProxy(stateRef.durations);
+        }
+
+    private:
+        int idx;
+        State& stateRef;
+    };
+
+    // Begin and end methods for range-based for
+    Iterator begin() { return Iterator(0, *this); }
+    Iterator end()   { return Iterator(count, *this); }
+
+    // Print timing statistics
+    void printStats() const
+    {
+        if (durations.empty()) {
+            std::cout << "No iterations recorded.\n";
+            return;
+        }
+
+        // Find min and max
+        auto minmax = std::minmax_element(durations.begin(), durations.end());
+        double minVal = *minmax.first;
+        double maxVal = *minmax.second;
+
+        // Compute the average
+        double sumVal = std::accumulate(durations.begin(), durations.end(), 0.0);
+        double meanVal = sumVal / durations.size();
+
+        std::cout << "Min: " << minVal << " microseconds\n"
+                  << "Max: " << maxVal << " microseconds\n"
+                  << "Avg: " << meanVal << " microseconds\n";
+    }
+
+private:
+    int count;
+    std::vector<double> durations;
+};
+
+int main()
+{
+    // Example: measure 5 iterations
+    State state(5);
+
+    // Each iteration automatically gets timed by State’s TimerProxy
+    for (auto measure : state)
+    {
+        // -------------------------
+        // Code you want to measure
+        // -------------------------
+        volatile int x = 0;
+        for (int i = 0; i < 1000000; ++i) {
+            x += i;
+        }
+        // 'measure' goes out of scope here,
+        // so TimerProxy's destructor records the time
+    }
+
+    // Print results
+    state.printStats();
+
+    return 0;
+}
+*/
+#include "test.h"
+#include <cmath> // for sin
+
+static void escape(void *p)
+{
+    asm volatile("" : : "g"(p) : "memory");
+} 
+
+static void clobber()
+{
+    asm volatile("" : :  : "memory");
+} 
+
+
+// A sample user function that we want to benchmark
+void MyTrigBenchmarkaa(Abench::State& state) {
+    for (auto _ : state) {
+        volatile double sum = 0.0;
+        for (int i = 0; i < 100; ++i) {
+            sum += std::sin(i * 0.001);
+        }
+
+    }
+}
+
+// A sample user function that we want to benchmark
+void MyTrigBenchmark(Abench::State& state) {
+    for (auto _ : state) {
+        volatile double sum = 0.0;
+        for (int i = 0; i < 100; ++i) {
+            sum += std::sin(i * 0.001);
+        }
+    }
+}
+
+
+
+
+
+// Register it via the macro
+BENCHMARK(MyTrigBenchmark)->Iterations(1000);
+// Register it via the macro
+BENCHMARK(MyTrigBenchmarkaa)->Name("Aaaa Test")->Iterations(1000);
+
+int main() {
+    // This runs all registered benchmarks
+    Abench::Initialize();
+    Abench::RunAll();
+    return 0;
+}
+
+
+
 #endif // ABENCHMARK_H
 
