@@ -1,1928 +1,3 @@
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <unistd.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <pthread.h>
-#include <stdatomic.h>
-
-
-#define BUFFER_SIZE 10 // Size of the circular buffer
-#define MESSAGE_LEN 25 // Maximum message length
-#define SHM_NAME "/circular_buffer_shm" // Shared memory name
-
-typedef struct {
-    atomic_int write_index; // Atomic write index
-    int read_index; // Read index (non-atomic for simplicity)
-    char messages[BUFFER_SIZE][MESSAGE_LEN]; // Message storage
-} CircularBuffer;
-
-
-
-
-
-
-
-
-pthread_t threads[2]; // Threads for message production
-pthread_t exit_thread; // Thread for exit detection
-int running = 1; // Flag to control thread execution
-
-// Shared buffer pointer
-CircularBuffer *shared_buffer;
-
-// Function to generate a fake message and write it to shared memory
-void *produce_messages(void *arg) {
-    int thread_id = *(int *)arg;
-    
-    for (int i = 0; running; i++) {
-        usleep(1000);
-        char message[MESSAGE_LEN];
-        snprintf(message, MESSAGE_LEN, "Thread %d: Message %d", thread_id, i);
-
-        
-        // Check buffer state
-        int current_write_index = atomic_load(&shared_buffer->write_index);
-        int next_index = (current_write_index + 1) % BUFFER_SIZE;
-
-        if (next_index == shared_buffer->read_index) {
-            //printf("Thread %d: Buffer is full. Waiting...\n", thread_id);
-            //sleep(1); // Simulate waiting when the buffer is full
-            i--;
-            continue;
-        }
-
-        // Write the message to the buffer
-        strncpy(shared_buffer->messages[current_write_index], message, MESSAGE_LEN);
-        printf("Thread %d produced: %s\n", thread_id, shared_buffer->messages[current_write_index]);
-
-        // Atomically update the write index
-        atomic_store(&shared_buffer->write_index, next_index);
-
-        //sleep(1); // Simulate delay
-    }
-
-    return NULL;
-}
-
-// Function to detect Enter key press and terminate the program
-void *detect_exit(void *arg) {
-    printf("Press Enter to terminate the program...\n");
-    getchar(); // Wait for user to press Enter
-    running = 0; // Set running flag to 0 to terminate threads
-    return NULL;
-}
-
-int main() {
-    int shm_fd;
-
-    // Step 1: Create shared memory
-    shm_fd = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0666);
-    if (shm_fd == -1) {
-        perror("shm_open failed");
-        exit(EXIT_FAILURE);
-    }
-
-    // Step 2: Set shared memory size
-    if (ftruncate(shm_fd, sizeof(CircularBuffer)) == -1) {
-        perror("ftruncate failed");
-        exit(EXIT_FAILURE);
-    }
-
-    // Step 3: Map shared memory
-    shared_buffer = mmap(NULL, sizeof(CircularBuffer), PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
-    if (shared_buffer == MAP_FAILED) {
-        perror("mmap failed");
-        exit(EXIT_FAILURE);
-    }
-
-    // Step 4: Initialize the circular buffer
-    atomic_store(&shared_buffer->write_index, 0);
-    shared_buffer->read_index = 0;
-
-    // Step 5: Create producer threads
-    int thread_ids[2] = {1, 2}; // Thread identifiers
-    for (int i = 0; i < 2; i++) {
-        if (pthread_create(&threads[i], NULL, produce_messages, &thread_ids[i]) != 0) {
-            perror("pthread_create failed");
-            exit(EXIT_FAILURE);
-        }
-    }
-
-    // Step 6: Create exit detection thread
-    if (pthread_create(&exit_thread, NULL, detect_exit, NULL) != 0) {
-        perror("pthread_create for exit detection failed");
-        exit(EXIT_FAILURE);
-    }
-
-    // Step 7: Wait for threads to finish
-    pthread_join(exit_thread, NULL); // Wait for the exit thread to complete
-    for (int i = 0; i < 2; i++) {
-        pthread_join(threads[i], NULL);
-    }
-
-    // Cleanup
-    munmap(shared_buffer, sizeof(CircularBuffer));
-    shm_unlink(SHM_NAME);
-
-    printf("Program terminated.\n");
-    return 0;
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <unistd.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <pthread.h>
-#include <stdatomic.h>
-#include <signal.h>
-
-#define BUFFER_SIZE 10       // Number of messages
-#define MESSAGE_LEN 25       // Length of each message
-#define SHM_NAME "/circular_buffer_shm" // Shared memory name
-
-pthread_t exit_thread; // Thread for exit detection
-int running = 1; // Flag to control thread execution
-
-typedef struct {
-    atomic_int write_index;      // Atomic index for writing messages
-    int read_index;              // Index for reading messages
-    char messages[BUFFER_SIZE][MESSAGE_LEN]; // Circular buffer storage
-} CircularBuffer;
-
-// Function to detect Enter key press and terminate the program
-void *detect_exit(void *arg) {
-    printf("Press Enter to terminate the program...\n");
-    getchar(); // Wait for user to press Enter
-    running = 0; // Set running flag to 0 to terminate threads
-    return NULL;
-}
-
-int main() {
-    CircularBuffer *shared_buffer;
-    int shm_fd;
-
-    // Step 1: Open shared memory
-    shm_fd = shm_open(SHM_NAME, O_RDWR, 0666);
-    if (shm_fd == -1) {
-        perror("shm_open failed");
-        exit(EXIT_FAILURE);
-    }
-
-    // Step 2: Map shared memory
-    shared_buffer = (CircularBuffer *)mmap(NULL, sizeof(CircularBuffer), PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
-    if (shared_buffer == MAP_FAILED) {
-        perror("mmap failed");
-        exit(EXIT_FAILURE);
-    }
-
-    // Step 3: Create exit detection thread
-    if (pthread_create(&exit_thread, NULL, detect_exit, NULL) != 0) {
-        perror("pthread_create for exit detection failed");
-        exit(EXIT_FAILURE);
-    }
-
-    // Step 4: Consume messages
-    while (running) {
-        // Atomically read the write index
-        int current_write_index = atomic_load(&shared_buffer->write_index);
-
-        // Check if the buffer is empty
-        if (shared_buffer->read_index == current_write_index) {
-            //printf("Buffer is empty. Waiting...\n");
-            //sleep(1); // Simulate waiting
-            continue;
-        }
-
-        // Consume the message
-        printf("Consumed: %s\n", shared_buffer->messages[shared_buffer->read_index]);
-
-        // Update read index (non-atomic since only the consumer modifies it)
-        shared_buffer->read_index = (shared_buffer->read_index + 1) % BUFFER_SIZE;
-
-        //sleep(1); // Simulate processing delay
-    }
-
-    // Wait for exit thread to complete
-    pthread_join(exit_thread, NULL);
-
-    // Cleanup
-    munmap(shared_buffer, sizeof(CircularBuffer));
-    close(shm_fd);
-
-    printf("Consumer terminated.\n");
-    return 0;
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <unistd.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <pthread.h>
-#include <stdatomic.h>
-#include <time.h>
-
-void delay_ms(unsigned int ms) {
-    clock_t start_time = clock();  // Get the current clock time
-    clock_t end_time = ms * CLOCKS_PER_SEC / 1000 + start_time;
-
-    while (clock() < end_time) {
-        // Wait until the specified time has passed
-    }
-}
-
-#define BUFFER_SIZE 5 // Size of the circular buffer
-#define MESSAGE_LEN 100 // Maximum message length
-#define SHM_NAME "/circular_buffer_shm" // Shared memory name
-
-typedef struct {
-    atomic_int write_index; // Atomic write index
-    atomic_int read_index; // Atomic read index
-    char messages[BUFFER_SIZE][MESSAGE_LEN]; // Message storage
-} CircularBuffer;
-
-pthread_t threads[7]; // Threads for message production
-pthread_t threads2[7]; // Threads for message production
-pthread_t exit_thread; // Thread for exit detection
-int running = 1; // Flag to control thread execution
-
-// Shared buffer pointer
-CircularBuffer *shared_buffer;
-
-int check_data_size(char *data) {
-    int cnt = 0;
-    while (*(data + cnt) != '\0') {
-        if (cnt >= MESSAGE_LEN) {
-            return -1;
-            break;
-        }
-        ++cnt;
-    }
-    return cnt;
-}
-
-void send_log(char *data) {
-    int data_len = check_data_size(data);
-    if (data_len == -1) {
-        printf("ERROR: Data size overflow!\n");
-        return;
-    }
-
-    // Get the current write index atomically
-    int current_write_index = atomic_fetch_add(&shared_buffer->write_index, 1);
-    int next_write_index = current_write_index + 1; 
-
-    // Get the current read index atomically
-    int current_read_index = atomic_load(&shared_buffer->read_index);
-
-    // If the buffer is full, use Compare-and-Swap (CAS) to update the read_index
-    if ((next_write_index % BUFFER_SIZE) == (current_read_index % BUFFER_SIZE)) {
-        // Try to update the read_index atomically using CAS
-        int expected_read_index = current_read_index;
-        int new_read_index = (current_read_index + 1) % BUFFER_SIZE;
-        // Compare and swap the read index
-        atomic_compare_exchange_strong(&shared_buffer->read_index, &expected_read_index, new_read_index);
-        
-        // After CAS, re-fetch the updated read index
-        current_read_index = atomic_load(&shared_buffer->read_index);
-    }
-
-    // Write the message to the buffer at the calculated write index position
-    strncpy(shared_buffer->messages[current_write_index % BUFFER_SIZE], data, data_len + 1);
-    printf("write index: %d    read index: %d\n", current_write_index % BUFFER_SIZE, current_read_index % BUFFER_SIZE);
-}
-
-void *thread_function(void *arg) {
-    int *id = (int*)arg; 
-    int counter = 0;
-    char data[250] = {};
-    while (running) {
-        sprintf(data, "Producer: Thread %d message: %d", *id, counter);
-        send_log(data);
-        delay_ms(1);
-        ++counter;
-    }
-}
-
-void *thread_function2(void *arg) {
-    int *id = (int*)arg; 
-    int counter = 0;
-    char data[250] = {};
-    while (running) {
-        sprintf(data, "Producer: Thread %d message: %d", *id, counter);
-        send_log(data);
-        delay_ms(2);
-        ++counter;
-    }
-}
-
-// Function to detect Enter key press and terminate the program
-void *detect_exit(void *arg) {
-    printf("Press Enter to terminate the program...\n");
-    getchar(); // Wait for user to press Enter
-    running = 0; // Set running flag to 0 to terminate threads
-    return NULL;
-}
-
-int main() {
-    int shm_fd;
-
-    // Step 1: Create shared memory
-    shm_fd = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0666);
-    if (shm_fd == -1) {
-        perror("shm_open failed");
-        exit(EXIT_FAILURE);
-    }
-
-    // Step 2: Set shared memory size
-    if (ftruncate(shm_fd, sizeof(CircularBuffer)) == -1) {
-        perror("ftruncate failed");
-        exit(EXIT_FAILURE);
-    }
-
-    // Step 3: Map shared memory
-    shared_buffer = mmap(NULL, sizeof(CircularBuffer), PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
-    if (shared_buffer == MAP_FAILED) {
-        perror("mmap failed");
-        exit(EXIT_FAILURE);
-    }
-
-    // Step 4: Initialize the circular buffer
-    atomic_store(&shared_buffer->write_index, 0);
-    atomic_store(&shared_buffer->read_index, 0);
-
-    // Step 5: Create producer threads
-    int thread_ids[7] = {1, 2, 3, 4, 5, 6, 7}; // Thread identifiers
-    for (int i = 0; i < 7; i++) {
-        if (pthread_create(&threads[i], NULL, thread_function, &thread_ids[i]) != 0) {
-            perror("pthread_create failed");
-            exit(EXIT_FAILURE);
-        }
-    }
-
-    // Step 5: Create producer threads
-    int thread_ids2[7] = {8, 9, 10, 11, 12, 13, 14}; // Thread identifiers
-    for (int i = 0; i < 7; i++) {
-        if (pthread_create(&threads2[i], NULL, thread_function2, &thread_ids2[i]) != 0) {
-            perror("pthread_create failed");
-            exit(EXIT_FAILURE);
-        }
-    }
-
-    // Step 6: Create exit detection thread
-    if (pthread_create(&exit_thread, NULL, detect_exit, NULL) != 0) {
-        perror("pthread_create for exit detection failed");
-        exit(EXIT_FAILURE);
-    }
-
-    // Step 7: Wait for threads to finish
-    pthread_join(exit_thread, NULL); // Wait for the exit thread to complete
-    for (int i = 0; i < 7; i++) {
-        pthread_join(threads[i], NULL);
-    }
-
-    for (int i = 0; i < 7; i++) {
-        pthread_join(threads2[i], NULL);
-    }
-
-    // Cleanup
-    munmap(shared_buffer, sizeof(CircularBuffer));
-    shm_unlink(SHM_NAME);
-
-    printf("Program terminated.\n");
-    return 0;
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <unistd.h>
-#include <stdio.h>
-
-#include <stdlib.h>
-#include <string.h>
-#include <pthread.h>
-#include <stdatomic.h>
-#include <time.h>
-
-void delay_ms(unsigned int ms) {
-    clock_t start_time = clock();  // Get the current clock time
-    clock_t end_time = ms * CLOCKS_PER_SEC / 1000 + start_time;
-
-    while (clock() < end_time) {
-        // Wait until the specified time has passed
-    }
-}
-
-#define BUFFER_SIZE 10 // Size of the circular buffer
-#define MESSAGE_LEN 100 // Maximum message length
-#define SHM_NAME "/circular_buffer_shm" // Shared memory name
-
-typedef struct {
-    atomic_int write_index; // Atomic write index
-    int read_index; // Read index (non-atomic for simplicity)
-    char messages[BUFFER_SIZE][MESSAGE_LEN]; // Message storage
-} CircularBuffer;
-
-
-pthread_t threads[2]; // Threads for message production
-pthread_t threads2[2]; // Threads for message production
-pthread_t exit_thread; // Thread for exit detection
-int running = 1; // Flag to control thread execution
-
-// Shared buffer pointer
-CircularBuffer *shared_buffer;
-
-
-
-int check_data_size(char *data)
-{
-    int cnt = 0;
-    while(*(data + cnt) != '\0' ){
-        if(cnt >= MESSAGE_LEN){
-            return -1;
-            break;
-        }
-        ++cnt;
-    }
-
-    return cnt;
-}
-
-
-
-void send_log(char *data)
-{
-    int data_len = check_data_size(data);
-    if(data_len == -1){
-        printf("EROORROR data size overflow!!!!!!\n");
-        return;
-    }
-
-    //get write index
-    int current_write_index = atomic_load(&shared_buffer->write_index);
-    int next_write_index = current_write_index + 1; 
-    atomic_fetch_add(&shared_buffer->write_index,1);
-    if (next_write_index == shared_buffer->read_index) {
-        ++shared_buffer->read_index;
-    }
-
-    // Write the message to the buffer
-    strncpy(shared_buffer->messages[current_write_index % BUFFER_SIZE], data, data_len+1);
-    //printf("Produced %s \n", data);
-}
-
-
-void *thread_function(void *arg)
-{
-    int *id =(int*)arg; 
-    int counter = 0;
-    char data[250] = {};
-    while (running)
-    {
-        sprintf(data, "Producer: Thread %d message: %d",*id, counter);
-        send_log(data);
-        delay_ms(1000);
-        ++counter;
-    }
-    
-}
-
-
-
-void *thread_function2(void *arg)
-{
-    int *id =(int*)arg; 
-    int counter = 0;
-    char data[250] = {};
-    while (running)
-    {
-        sprintf(data, "Producer: Thread %d message: %d",*id, counter);
-        send_log(data);
-        delay_ms(900);
-        ++counter;
-    }
-    
-}
-
-// Function to detect Enter key press and terminate the program
-void *detect_exit(void *arg) {
-    printf("Press Enter to terminate the program...\n");
-    getchar(); // Wait for user to press Enter
-    running = 0; // Set running flag to 0 to terminate threads
-    return NULL;
-}
-
-int main() {
-    int shm_fd;
-
-    // Step 1: Create shared memory
-    shm_fd = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0666);
-    if (shm_fd == -1) {
-        perror("shm_open failed");
-        exit(EXIT_FAILURE);
-    }
-
-    // Step 2: Set shared memory size
-    if (ftruncate(shm_fd, sizeof(CircularBuffer)) == -1) {
-        perror("ftruncate failed");
-        exit(EXIT_FAILURE);
-    }
-
-    // Step 3: Map shared memory
-    shared_buffer = mmap(NULL, sizeof(CircularBuffer), PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
-    if (shared_buffer == MAP_FAILED) {
-        perror("mmap failed");
-        exit(EXIT_FAILURE);
-    }
-
-    // Step 4: Initialize the circular buffer
-    atomic_store(&shared_buffer->write_index, 0);
-    shared_buffer->read_index = 0;
-
-    // Step 5: Create producer threads
-    int thread_ids[2] = {1, 2}; // Thread identifiers
-    for (int i = 0; i < 2; i++) {
-        if (pthread_create(&threads[i], NULL, thread_function, &thread_ids[i]) != 0) {
-            perror("pthread_create failed");
-            exit(EXIT_FAILURE);
-        }
-    }
-
-
-    // Step 5: Create producer threads
-    int thread_ids2[2] = {3, 4}; // Thread identifiers
-    for (int i = 0; i < 2; i++) {
-        if (pthread_create(&threads2[i], NULL, thread_function2, &thread_ids2[i]) != 0) {
-            perror("pthread_create failed");
-            exit(EXIT_FAILURE);
-        }
-    }
-
-    // Step 6: Create exit detection thread
-    if (pthread_create(&exit_thread, NULL, detect_exit, NULL) != 0) {
-        perror("pthread_create for exit detection failed");
-        exit(EXIT_FAILURE);
-    }
-
-    // Step 7: Wait for threads to finish
-    pthread_join(exit_thread, NULL); // Wait for the exit thread to complete
-    for (int i = 0; i < 2; i++) {
-        pthread_join(threads[i], NULL);
-    }
-
-    for (int i = 0; i < 2; i++) {
-        pthread_join(threads2[i], NULL);
-    }
-
-    // Cleanup
-    munmap(shared_buffer, sizeof(CircularBuffer));
-    shm_unlink(SHM_NAME);
-
-    printf("Program terminated.\n");
-    return 0;
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-#include <gtest/gtest.h>
-#include <vector>
-#include <cstdlib>
-#include <ctime>
-#include <type_traits>
-#include "MatrixLibrary.h" // Replace with your function-based matrix library header
-
-// Template helper function to generate random matrices
-template <typename T>
-std::vector<std::vector<T>> generateRandomMatrix(size_t rows, size_t cols, T minVal = T(0), T maxVal = T(100)) {
-    static_assert(std::is_arithmetic<T>::value, "T must be an arithmetic type");
-
-    std::vector<std::vector<T>> matrix(rows, std::vector<T>(cols));
-    for (size_t i = 0; i < rows; ++i) {
-        for (size_t j = 0; j < cols; ++j) {
-            if constexpr (std::is_integral<T>::value) {
-                matrix[i][j] = minVal + rand() % (maxVal - minVal + 1);
-            } else {
-                T scale = static_cast<T>(rand()) / static_cast<T>(RAND_MAX);
-                matrix[i][j] = minVal + scale * (maxVal - minVal);
-            }
-        }
-    }
-    return matrix;
-}
-
-// Define a Test Suite Class
-class MatrixFunctionTestSuite : public ::testing::Test {
-protected:
-    // Predefined matrices
-    std::vector<std::vector<int>> m1, m2;
-    std::vector<std::vector<double>> m3, zeroMatrix;
-
-    // Called before every test in the suite
-    void SetUp() override {
-        m1 = {{1, 2}, {3, 4}};
-        m2 = {{5, 6}, {7, 8}};
-        m3 = {{2.5, 0.0}, {1.2, 2.3}};
-        zeroMatrix = {{0.0, 0.0}, {0.0, 0.0}};
-    }
-
-    // Called after every test in the suite
-    void TearDown() override {
-        // Clean-up code if needed
-    }
-};
-
-// Test: Matrix Addition
-TEST_F(MatrixFunctionTestSuite, AdditionTest) {
-    auto result = addMatrices(m1, m2); // Replace with your addition function
-    std::vector<std::vector<int>> expected = {{6, 8}, {10, 12}};
-    EXPECT_EQ(result, expected);
-
-    auto doubleResult = addMatrices(m3, zeroMatrix); // Replace with your addition function
-    EXPECT_EQ(doubleResult, m3);
-}
-
-// Test: Matrix Multiplication
-TEST_F(MatrixFunctionTestSuite, MultiplicationTest) {
-    auto result = multiplyMatrices(m1, m2); // Replace with your multiplication function
-    EXPECT_EQ(result.size(), 2); // Adjust as per your implementation
-
-    auto doubleResult = multiplyMatrices(m3, zeroMatrix);
-    EXPECT_EQ(doubleResult, zeroMatrix);
-}
-
-// Test: Transpose Matrix
-TEST_F(MatrixFunctionTestSuite, TransposeTest) {
-    auto result = transposeMatrix(m1); // Replace with your transpose function
-    std::vector<std::vector<int>> expected = {{1, 3}, {2, 4}};
-    EXPECT_EQ(result, expected);
-}
-
-// Test: Random Matrix
-TEST_F(MatrixFunctionTestSuite, RandomMatrixTest) {
-    // Generate a random int matrix
-    auto randomIntMatrix = generateRandomMatrix<int>(3, 3, 0, 10);
-    EXPECT_EQ(randomIntMatrix.size(), 3);
-    EXPECT_EQ(randomIntMatrix[0].size(), 3);
-
-    // Generate a random double matrix
-    auto randomDoubleMatrix = generateRandomMatrix<double>(3, 3, -1.0, 1.0);
-    EXPECT_EQ(randomDoubleMatrix.size(), 3);
-    EXPECT_EQ(randomDoubleMatrix[0].size(), 3);
-
-    // Check that all values are in the range
-    for (const auto& row : randomDoubleMatrix) {
-        for (double val : row) {
-            EXPECT_GE(val, -1.0);
-            EXPECT_LE(val, 1.0);
-        }
-    }
-}
-
-// Main Function to Run Tests
-int main(int argc, char **argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    srand(static_cast<unsigned>(time(0))); // Seed for random number generator
-    return RUN_ALL_TESTS();
-}
-
-
-
-
-
-
-
-
-
-#include <iostream>
-#include <vector>
-#include <stdexcept>
-#include <cmath>
-
-template <typename T>
-class MatrixOperations {
-public:
-    // Matrix Addition
-    static std::vector<std::vector<T>> add(const std::vector<std::vector<T>>& mat1, const std::vector<std::vector<T>>& mat2) {
-        checkSameDimensions(mat1, mat2);
-        std::vector<std::vector<T>> result = mat1;
-        for (size_t i = 0; i < mat1.size(); ++i) {
-            for (size_t j = 0; j < mat1[i].size(); ++j) {
-                result[i][j] += mat2[i][j];
-            }
-        }
-        return result;
-    }
-
-    // Matrix Subtraction
-    static std::vector<std::vector<T>> subtract(const std::vector<std::vector<T>>& mat1, const std::vector<std::vector<T>>& mat2) {
-        checkSameDimensions(mat1, mat2);
-        std::vector<std::vector<T>> result = mat1;
-        for (size_t i = 0; i < mat1.size(); ++i) {
-            for (size_t j = 0; j < mat1[i].size(); ++j) {
-                result[i][j] -= mat2[i][j];
-            }
-        }
-        return result;
-    }
-
-    // Matrix Multiplication
-    static std::vector<std::vector<T>> multiply(const std::vector<std::vector<T>>& mat1, const std::vector<std::vector<T>>& mat2) {
-        if (mat1[0].size() != mat2.size()) {
-            throw std::invalid_argument("Invalid dimensions for matrix multiplication.");
-        }
-        std::vector<std::vector<T>> result(mat1.size(), std::vector<T>(mat2[0].size(), 0));
-        for (size_t i = 0; i < mat1.size(); ++i) {
-            for (size_t j = 0; j < mat2[0].size(); ++j) {
-                for (size_t k = 0; k < mat1[0].size(); ++k) {
-                    result[i][j] += mat1[i][k] * mat2[k][j];
-                }
-            }
-        }
-        return result;
-    }
-
-    // Matrix Transpose
-    static std::vector<std::vector<T>> transpose(const std::vector<std::vector<T>>& mat) {
-        std::vector<std::vector<T>> result(mat[0].size(), std::vector<T>(mat.size()));
-        for (size_t i = 0; i < mat.size(); ++i) {
-            for (size_t j = 0; j < mat[i].size(); ++j) {
-                result[j][i] = mat[i][j];
-            }
-        }
-        return result;
-    }
-
-    // Scalar Multiplication
-    static std::vector<std::vector<T>> scalarMultiply(const std::vector<std::vector<T>>& mat, T scalar) {
-        std::vector<std::vector<T>> result = mat;
-        for (size_t i = 0; i < mat.size(); ++i) {
-            for (size_t j = 0; j < mat[i].size(); ++j) {
-                result[i][j] *= scalar;
-            }
-        }
-        return result;
-    }
-
-    // Element-wise Multiplication (Hadamard Product)
-    static std::vector<std::vector<T>> elementWiseMultiply(const std::vector<std::vector<T>>& mat1, const std::vector<std::vector<T>>& mat2) {
-        checkSameDimensions(mat1, mat2);
-        std::vector<std::vector<T>> result = mat1;
-        for (size_t i = 0; i < mat1.size(); ++i) {
-            for (size_t j = 0; j < mat1[i].size(); ++j) {
-                result[i][j] *= mat2[i][j];
-            }
-        }
-        return result;
-    }
-
-    // Determinant (for square matrices)
-    static T determinant(const std::vector<std::vector<T>>& mat) {
-        checkSquareMatrix(mat);
-        if (mat.size() == 1) {
-            return mat[0][0];
-        }
-        if (mat.size() == 2) {
-            return mat[0][0] * mat[1][1] - mat[0][1] * mat[1][0];
-        }
-        T det = 0;
-        for (size_t i = 0; i < mat[0].size(); ++i) {
-            det += (i % 2 == 0 ? 1 : -1) * mat[0][i] * determinant(minorMatrix(mat, 0, i));
-        }
-        return det;
-    }
-
-    // Matrix Inversion (for square matrices)
-    static std::vector<std::vector<T>> inverse(const std::vector<std::vector<T>>& mat) {
-        checkSquareMatrix(mat);
-        T det = determinant(mat);
-        if (std::abs(det) < 1e-9) {
-            throw std::invalid_argument("Matrix is singular and cannot be inverted.");
-        }
-        if (mat.size() == 1) {
-            return {{1 / mat[0][0]}};
-        }
-        std::vector<std::vector<T>> adj(mat.size(), std::vector<T>(mat.size()));
-        for (size_t i = 0; i < mat.size(); ++i) {
-            for (size_t j = 0; j < mat.size(); ++j) {
-                adj[j][i] = (i + j % 2 == 0 ? 1 : -1) * determinant(minorMatrix(mat, i, j));
-            }
-        }
-        return scalarMultiply(adj, 1 / det);
-    }
-
-private:
-    // Helper: Check if two matrices have the same dimensions
-    static void checkSameDimensions(const std::vector<std::vector<T>>& mat1, const std::vector<std::vector<T>>& mat2) {
-        if (mat1.size() != mat2.size() || mat1[0].size() != mat2[0].size()) {
-            throw std::invalid_argument("Matrices must have the same dimensions.");
-        }
-    }
-
-    // Helper: Check if the matrix is square
-    static void checkSquareMatrix(const std::vector<std::vector<T>>& mat) {
-        if (mat.size() != mat[0].size()) {
-            throw std::invalid_argument("Matrix must be square.");
-        }
-    }
-
-    // Helper: Calculate minor matrix for determinant calculation
-    static std::vector<std::vector<T>> minorMatrix(const std::vector<std::vector<T>>& mat, size_t row, size_t col) {
-        std::vector<std::vector<T>> minor;
-        for (size_t i = 0; i < mat.size(); ++i) {
-            if (i == row) continue;
-            std::vector<T> minorRow;
-            for (size_t j = 0; j < mat[i].size(); ++j) {
-                if (j == col) continue;
-                minorRow.push_back(mat[i][j]);
-            }
-            minor.push_back(minorRow);
-        }
-        return minor;
-    }
-};
-
-// Helper to print a matrix
-template <typename T>
-void printMatrix(const std::vector<std::vector<T>>& mat) {
-    for (const auto& row : mat) {
-        for (const auto& elem : row) {
-            std::cout << elem << " ";
-        }
-        std::cout << "\n";
-    }
-    std::cout << "\n";
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <unistd.h>      // For usleep
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <pthread.h>
-#include <stdatomic.h>
-#include <stdint.h>       // For uint64_t
-#include <time.h>
-
-#define BUFFER_SIZE 10000
-#define THREADNUM 20
-#define MESSAGE_LEN 100
-#define SHM_NAME "/circular_buffer_shm"
-
-typedef struct {
-    _Atomic uint64_t write_index; // 64-bit Atomic write index
-    _Atomic uint64_t read_index;  // 64-bit Atomic read index
-    char messages[BUFFER_SIZE][MESSAGE_LEN];
-} CircularBuffer;
-
-_Atomic uint64_t message_counter;
-_Atomic uint64_t message_counter2;
-_Atomic int running;  // This can remain int since we only use 0/1, but atomic is fine
-
-pthread_t threads[THREADNUM];
-pthread_t consumer_thread;
-pthread_t exit_thread;
-
-CircularBuffer *shared_buffer;
-
-void delay_ms(unsigned int ms) {
-    usleep(ms * 1000);
-}
-
-int check_data_size(char *data) {
-    int cnt = 0;
-    while (data[cnt] != '\0') {
-        if (cnt >= MESSAGE_LEN) {
-            return -1;
-        }
-        ++cnt;
-    }
-    return cnt;
-}
-
-void send_log(char *data) {
-    int data_len = check_data_size(data);
-    if (data_len == -1) {
-        printf("ERROR: Data size overflow!\n");
-        return;
-    }
-
-    uint64_t current_write_index = atomic_fetch_add(&shared_buffer->write_index, 1);
-    uint64_t next_write_index = current_write_index + 1;
-
-    uint64_t current_read_index = atomic_load(&shared_buffer->read_index);
-
-    if ((next_write_index - current_read_index) > BUFFER_SIZE) {
-        atomic_fetch_add(&shared_buffer->read_index, 1);
-    }
-
-    uint64_t pos = current_write_index % BUFFER_SIZE;
-    snprintf(shared_buffer->messages[pos], MESSAGE_LEN,
-             "Producer message: %s | WriteIndex: %lu", data, (unsigned long)current_write_index);
-    atomic_fetch_add(&message_counter2, 1);
-}
-
-void *producer_thread_function(void *arg) {
-    int id = *(int*)arg;
-    uint64_t counter = 0;
-    char data[250] = {};
-    while (atomic_load(&running)) {
-        snprintf(data, sizeof(data), "Thread %d message: %lu", id, (unsigned long)counter);
-        send_log(data);
-        atomic_fetch_add(&message_counter, 1);
-        ++counter;
-    }
-    return NULL;
-}
-
-void *consumer_thread_function(void *arg) {
-    while (1) {
-        uint64_t w = atomic_load(&shared_buffer->write_index);
-        uint64_t r = atomic_load(&shared_buffer->read_index);
-
-        if (r < w) {
-            uint64_t pos = r % BUFFER_SIZE;
-            printf("Consumer read: %s | RIndex: %lu | WIndex: %lu\n",
-                   shared_buffer->messages[pos], (unsigned long)r, (unsigned long)w);
-            atomic_fetch_add(&shared_buffer->read_index, 1);
-        } else {
-            if (!atomic_load(&running)) {
-                if (atomic_load(&shared_buffer->read_index) == atomic_load(&shared_buffer->write_index)) {
-                    break;
-                }
-            }
-            delay_ms(1);
-        }
-    }
-
-    return NULL;
-}
-
-void *detect_exit(void *arg) {
-    getchar();
-    atomic_store(&running, 0);
-    return NULL;
-}
-
-int main() {
-    int shm_fd;
-
-    shm_fd = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0666);
-    if (shm_fd == -1) {
-        perror("shm_open failed");
-        exit(EXIT_FAILURE);
-    }
-
-    if (ftruncate(shm_fd, sizeof(CircularBuffer)) == -1) {
-        perror("ftruncate failed");
-        exit(EXIT_FAILURE);
-    }
-
-    shared_buffer = mmap(NULL, sizeof(CircularBuffer), PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
-    if (shared_buffer == MAP_FAILED) {
-        perror("mmap failed");
-        exit(EXIT_FAILURE);
-    }
-
-    atomic_store(&message_counter, 0);
-    atomic_store(&message_counter2, 0);
-    atomic_store(&shared_buffer->write_index, 0);
-    atomic_store(&shared_buffer->read_index, 0);
-    atomic_store(&running, 1);
-
-    int thread_ids[THREADNUM];
-    for (int i = 0; i < THREADNUM; ++i) {
-        thread_ids[i] = i + 1;
-        if (pthread_create(&threads[i], NULL, producer_thread_function, &thread_ids[i]) != 0) {
-            perror("pthread_create failed");
-            exit(EXIT_FAILURE);
-        }
-    }
-
-    if (pthread_create(&consumer_thread, NULL, consumer_thread_function, NULL) != 0) {
-        perror("pthread_create for consumer failed");
-        exit(EXIT_FAILURE);
-    }
-
-    if (pthread_create(&exit_thread, NULL, detect_exit, NULL) != 0) {
-        perror("pthread_create for exit detection failed");
-        exit(EXIT_FAILURE);
-    }
-
-    pthread_join(exit_thread, NULL);
-
-    for (int i = 0; i < THREADNUM; i++) {
-        pthread_join(threads[i], NULL);
-    }
-
-    pthread_join(consumer_thread, NULL);
-
-    uint64_t final_write_index = atomic_load(&shared_buffer->write_index);
-    uint64_t final_read_index = atomic_load(&shared_buffer->read_index);
-
-    printf("Number of messages attempted to write: %lu\n", (unsigned long)atomic_load(&message_counter));
-    printf("Number of messages actually written: %lu\n", (unsigned long)atomic_load(&message_counter2));
-    printf("Final Write Index: %lu\n", (unsigned long)final_write_index);
-    printf("Final Read Index: %lu\n", (unsigned long)final_read_index);
-
-    munmap(shared_buffer, sizeof(CircularBuffer));
-    shm_unlink(SHM_NAME);
-
-    return 0;
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <unistd.h>      // For usleep
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <pthread.h>
-#include <stdatomic.h>
-#include <stdint.h>       // For uint64_t
-#include <time.h>
-
-#define BUFFER_SIZE 100000
-#define THREADNUM 100
-#define MESSAGE_LEN 100
-#define SHM_NAME "/circular_buffer_shm"
-
-typedef struct {
-    _Atomic uint64_t write_index; // 64-bit Atomic write index
-    _Atomic uint64_t read_index;  // 64-bit Atomic read index
-    char messages[BUFFER_SIZE][MESSAGE_LEN];
-} CircularBuffer;
-
-_Atomic uint8_t bufferOverflowFlag;
-_Atomic uint64_t message_counter;
-_Atomic uint64_t message_counter2;
-_Atomic uint64_t message_counter3;
-_Atomic uint64_t message_counter4;
-
-
-
-_Atomic int running;  // This can remain int since we only use 0/1, but atomic is fine
-
-pthread_t threads[THREADNUM];
-pthread_t consumer_thread;
-pthread_t exit_thread;
-
-CircularBuffer *shared_buffer;
-
-#include <time.h>
-#include <stdio.h>
-
-void delay_ms(unsigned int ms) {
-    // Get the clock frequency of the system
-    clock_t start_time = clock();
-
-    // Calculate the number of clock ticks needed for the requested delay
-    clock_t ticks_to_wait = (clock_t)(ms * (CLOCKS_PER_SEC / 1000.0));
-
-    while ((clock() - start_time) < ticks_to_wait) {
-        // Busy wait
-    }
-}
-int check_data_size(char *data) {
-    int cnt = 0;
-    while (data[cnt] != '\0') {
-        if (cnt >= MESSAGE_LEN) {
-            return -1;
-        }
-        ++cnt;
-    }
-    return cnt;
-}
-
-void send_log(char *data) {
-    int data_len = check_data_size(data);
-    if (data_len == -1) {
-        printf("ERROR: Data size overflow!\n");
-        return;
-    }
-
-    uint64_t current_write_index = atomic_fetch_add(&shared_buffer->write_index, 1);
-    uint64_t next_write_index = current_write_index + 1;
-
-    uint64_t current_read_index = atomic_load(&shared_buffer->read_index);
-
-    if ((next_write_index - current_read_index) > BUFFER_SIZE) {
-        if(atomic_load(&bufferOverflowFlag) == 1){
-            atomic_store(&running, 0);
-            return;
-        }
-        current_read_index = atomic_fetch_add(&shared_buffer->read_index, 1);
-    }
-
-
-    uint64_t pos = current_write_index % BUFFER_SIZE;
-    snprintf(shared_buffer->messages[pos], MESSAGE_LEN,
-             "%s -- %lu %lu %lu %lu",data, (unsigned long)current_write_index % BUFFER_SIZE, current_read_index % BUFFER_SIZE,current_write_index,current_read_index);
-    atomic_fetch_add(&message_counter2, 1);
-}
-
-void *producer_thread_function(void *arg) {
-    int id = *(int*)arg;
-    uint64_t counter = 0;
-    char data[250] = {};
-    while (atomic_load(&running)) {
-        counter = atomic_fetch_add(&message_counter, 1);
-        snprintf(data, sizeof(data), "%d %lu", id, (unsigned long)counter);
-        send_log(data);
-        //delay_ms(1);
-    }
-    return NULL;
-}
-
-void *consumer_thread_function(void *arg) {
-    while (1) {
-        uint64_t w = atomic_load(&shared_buffer->write_index);
-        uint64_t r = atomic_load(&shared_buffer->read_index);
-
-        if (r < w) {
-            uint64_t pos = r % BUFFER_SIZE;
-            printf("%lu %lu-||-%s\n",w,r,shared_buffer->messages[pos]); 
-            atomic_fetch_add(&shared_buffer->read_index, 1);
-            atomic_fetch_add(&message_counter3, 1);
-
-            if(!atomic_load(&running)){
-                atomic_fetch_add(&message_counter4, 1);
-
-            }
-            //delay_ms(1);
-        } else {
-            if (!atomic_load(&running)) {
-                if (atomic_load(&shared_buffer->read_index) == atomic_load(&shared_buffer->write_index)) {
-                    break;
-                }
-            }
-            delay_ms(1);
-        }
-    }
-
-    return NULL;
-}
-
-void *detect_exit(void *arg) {
-    getchar();
-    atomic_store(&running, 0);
-    return NULL;
-}
-
-int main() {
-    int shm_fd;
-
-    shm_fd = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0666);
-    if (shm_fd == -1) {
-        perror("shm_open failed");
-        exit(EXIT_FAILURE);
-    }
-
-    if (ftruncate(shm_fd, sizeof(CircularBuffer)) == -1) {
-        perror("ftruncate failed");
-        exit(EXIT_FAILURE);
-    }
-
-    shared_buffer = mmap(NULL, sizeof(CircularBuffer), PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
-    if (shared_buffer == MAP_FAILED) {
-        perror("mmap failed");
-        exit(EXIT_FAILURE);
-    }
-    atomic_store(&bufferOverflowFlag, 1);
-    atomic_store(&message_counter, 0);
-    atomic_store(&message_counter2, 0);
-    atomic_store(&message_counter3, 0);
-    atomic_store(&message_counter4, 0);
-    atomic_store(&shared_buffer->write_index, 0);
-    atomic_store(&shared_buffer->read_index, 0);
-    atomic_store(&running, 1);
-
-    int thread_ids[THREADNUM];
-    for (int i = 0; i < THREADNUM; ++i) {
-        thread_ids[i] = i + 1;
-        if (pthread_create(&threads[i], NULL, producer_thread_function, &thread_ids[i]) != 0) {
-            perror("pthread_create failed");
-            exit(EXIT_FAILURE);
-        }
-    }
-
-    if (pthread_create(&consumer_thread, NULL, consumer_thread_function, NULL) != 0) {
-        perror("pthread_create for consumer failed");
-        exit(EXIT_FAILURE);
-    }
-
-    if (pthread_create(&exit_thread, NULL, detect_exit, NULL) != 0) {
-        perror("pthread_create for exit detection failed");
-        exit(EXIT_FAILURE);
-    }
-
-    pthread_join(exit_thread, NULL);
-
-    for (int i = 0; i < THREADNUM; i++) {
-        pthread_join(threads[i], NULL);
-    }
-
-    pthread_join(consumer_thread, NULL);
-
-    uint64_t final_write_index = atomic_load(&shared_buffer->write_index);
-    uint64_t final_read_index = atomic_load(&shared_buffer->read_index);
-
-    printf("Number of messages attempted to write: %lu\n", (unsigned long)atomic_load(&message_counter));
-    printf("Number of messages actually written: %lu\n", (unsigned long)atomic_load(&message_counter2));
-    printf("Number of messages actually readed: %lu\n", (unsigned long)atomic_load(&message_counter3));
-    printf("Number of messages actually wait to end: %lu\n", (unsigned long)atomic_load(&message_counter4));
-    printf("Final Write Index: %lu\n", (unsigned long)final_write_index);
-    printf("Final Read Index: %lu\n", (unsigned long)final_read_index);
-
-    munmap(shared_buffer, sizeof(CircularBuffer));
-    shm_unlink(SHM_NAME);
-
-    return 0;
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-#include <stdio.h>
-#include <stdlib.h>
-#include <stdint.h>
-#include <stdatomic.h>
-#include <pthread.h>
-#include <unistd.h>
-#include <string.h>
-
-#define BUFFER_SIZE 1024
-#define THREADNUM 4
-#define SHM_NAME "/myshm"
-
-// Assuming CircularBuffer and other global variables are defined elsewhere
-typedef struct {
-    _Atomic uint64_t write_index;
-    _Atomic uint64_t read_index;
-    char messages[BUFFER_SIZE][128]; // Example message size
-} CircularBuffer;
-
-_Atomic uint64_t message_counter;
-_Atomic uint64_t message_counter2;
-_Atomic uint64_t message_counter3;
-_Atomic uint64_t message_counter4;
-_Atomic int running;
-_Atomic int bufferOverflowFlag;
-
-CircularBuffer *shared_buffer;
-
-pthread_t threads[THREADNUM];
-pthread_t consumer_thread;
-pthread_t exit_thread;
-
-// Assume these functions are defined elsewhere
-// void *producer_thread_function(void *arg);
-// void *consumer_thread_function(void *arg);
-// void delay_ms(int ms);
-
-void *consumer_thread_function(void *arg) {
-    while (1) {
-        uint64_t w = atomic_load(&shared_buffer->write_index);
-        uint64_t r = atomic_load(&shared_buffer->read_index);
-
-        if (r < w) {
-            uint64_t pos = r % BUFFER_SIZE;
-            printf("%lu %lu-||-%s\n", w, r, shared_buffer->messages[pos]); 
-            atomic_fetch_add(&shared_buffer->read_index, 1);
-            atomic_fetch_add(&message_counter3, 1);
-
-            if(!atomic_load(&running)){
-                atomic_fetch_add(&message_counter4, 1);
-            }
-        } else {
-            if (!atomic_load(&running)) {
-                if (atomic_load(&shared_buffer->read_index) == atomic_load(&shared_buffer->write_index)) {
-                    break;
-                }
-            }
-            //delay_ms(1);
-            usleep(1000); // Instead of delay_ms(1)
-        }
-    }
-
-    return NULL;
-}
-
-void *detect_exit(void *arg) {
-    getchar();
-    atomic_store(&running, 0);
-    return NULL;
-}
-
-int main() {
-    // Removed all shared memory code (shm_open, ftruncate, mmap, etc.)
-    // Instead use calloc
-    shared_buffer = calloc(1, sizeof(CircularBuffer));
-    if (!shared_buffer) {
-        perror("calloc failed");
-        exit(EXIT_FAILURE);
-    }
-
-    atomic_store(&bufferOverflowFlag, 1);
-    atomic_store(&message_counter, 0);
-    atomic_store(&message_counter2, 0);
-    atomic_store(&message_counter3, 0);
-    atomic_store(&message_counter4, 0);
-    atomic_store(&shared_buffer->write_index, 0);
-    atomic_store(&shared_buffer->read_index, 0);
-    atomic_store(&running, 1);
-
-    int thread_ids[THREADNUM];
-    for (int i = 0; i < THREADNUM; ++i) {
-        thread_ids[i] = i + 1;
-        if (pthread_create(&threads[i], NULL, producer_thread_function, &thread_ids[i]) != 0) {
-            perror("pthread_create failed");
-            exit(EXIT_FAILURE);
-        }
-    }
-
-    if (pthread_create(&consumer_thread, NULL, consumer_thread_function, NULL) != 0) {
-        perror("pthread_create for consumer failed");
-        exit(EXIT_FAILURE);
-    }
-
-    if (pthread_create(&exit_thread, NULL, detect_exit, NULL) != 0) {
-        perror("pthread_create for exit detection failed");
-        exit(EXIT_FAILURE);
-    }
-
-    pthread_join(exit_thread, NULL);
-
-    for (int i = 0; i < THREADNUM; i++) {
-        pthread_join(threads[i], NULL);
-    }
-
-    pthread_join(consumer_thread, NULL);
-
-    uint64_t final_write_index = atomic_load(&shared_buffer->write_index);
-    uint64_t final_read_index = atomic_load(&shared_buffer->read_index);
-
-    printf("Number of messages attempted to write: %lu\n", (unsigned long)atomic_load(&message_counter));
-    printf("Number of messages actually written: %lu\n", (unsigned long)atomic_load(&message_counter2));
-    printf("Number of messages actually readed: %lu\n", (unsigned long)atomic_load(&message_counter3));
-    printf("Number of messages actually wait to end: %lu\n", (unsigned long)atomic_load(&message_counter4));
-    printf("Final Write Index: %lu\n", (unsigned long)final_write_index);
-    printf("Final Read Index: %lu\n", (unsigned long)final_read_index);
-
-    // Free the allocated memory since we are not using shared memory
-    free(shared_buffer);
-
-    return 0;
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-#include <iostream>
-#include <cstdio>      // For printf, freopen, tmpfile, etc.
-#include <string>
-#include <cstring>     // For strlen (if needed, not strictly here)
-#include <stdexcept>   // For std::runtime_error (if needed)
-#include <cstdlib>     // For std::tmpfile (ISO C)
-
-int main()
-{
-    // 1) Create a temporary file to capture all stdout output.
-    //    tmpfile() gives us an unnamed, temporary file opened in "wb+" mode.
-    //    On success, we have a valid FILE* that we can both write and read.
-    FILE* tempFile = std::tmpfile();
-    if (!tempFile) {
-        std::cerr << "Failed to create a temporary file for capturing.\n";
-        return 1;
-    }
-
-    // 2) Save the old stdout so we can restore it later.
-    //    This is a pointer to the same FILE structure that 'stdout' is currently using.
-    FILE* oldStdout = stdout;
-
-    // 3) Redirect 'stdout' to our temporary file.
-    //    In many implementations, 'std::cout' will also now write into tempFile,
-    //    but this is not 100% guaranteed by the standard. Usually it works.
-    stdout = tempFile;
-
-    // ---- BEGIN CAPTURE ----
-    // All these writes should go into tempFile instead of the real console.
-    printf("Hello from printf!\n");
-    std::cout << "Hello from std::cout! This is valid output.\n";
-
-    // Flush both C and C++ buffers to ensure everything is physically written to tempFile.
-    fflush(stdout);        // flush the C library buffer
-    std::cout.flush();     // flush the C++ iostream buffer
-    // ---- END CAPTURE ----
-
-    // 4) Restore the real stdout.
-    stdout = oldStdout;
-
-    // 5) Now we want to read from the temporary file the data that was captured.
-    //    First, we must rewind the file pointer to the start.
-    std::fseek(tempFile, 0, SEEK_SET);
-
-    // Read everything from tempFile into a std::string.
-    std::string captured;
-    {
-        char buffer[1024];
-        while (std::fgets(buffer, sizeof(buffer), tempFile)) {
-            captured += buffer;
-        }
-    }
-
-    // 6) Close the temporary file. We now have the entire captured output in 'captured'.
-    std::fclose(tempFile);
-
-    // 7) Check if the captured text contains "valid".
-    if (captured.find("valid") != std::string::npos) {
-        // It contains "valid", so print it to the (real) console.
-        std::cout << captured;
-    } else {
-        std::cout << "The captured output did NOT contain 'valid'.\n";
-    }
-
-    return 0;
-}
-
-
-
-
-
-
-
-#include <vxWorks.h>
-#include <stdio.h>
-#include <ioLib.h>
-#include <taskLib.h>
-#include <fcntl.h>   /* For O_CREAT, O_WRONLY, etc. */
-
-STATUS redirectPrintfToFile(void)
-{
-    int fd;
-    int oldStdOut;
-
-    /* Open or create the file for writing. 
-       O_CREAT creates the file if it doesn’t exist, and O_TRUNC 
-       will truncate it to zero length if it does. */
-    fd = open("myOutput.txt", O_CREAT | O_WRONLY | O_TRUNC, 0666);
-    if (fd == ERROR)
-    {
-        printf("Error opening file.\n");
-        return ERROR;
-    }
-
-    /* Save the old global STD_OUT fd in case you want to restore it later. */
-    oldStdOut = ioGlobalStdGet(STD_OUT);
-
-    /* Redirect STD_OUT to the file descriptor. */
-    if (ioGlobalStdSet(STD_OUT, fd) == ERROR)
-    {
-        printf("Error redirecting stdout.\n");
-        close(fd);
-        return ERROR;
-    }
-
-    /* Now any call to printf will go into "myOutput.txt". */
-    printf("Hello, this will be in myOutput.txt!\n");
-    printf("We are currently redirecting stdout.\n");
-
-    /* (Optional) Restore the original stdout (the console, typically). */
-    if (ioGlobalStdSet(STD_OUT, oldStdOut) == ERROR)
-    {
-        printf("Error restoring original stdout.\n");
-        close(fd);
-        return ERROR;
-    }
-
-    /* Close the file. */
-    close(fd);
-
-    /* Now prints will again go to the console. */
-    printf("Back to the console.\n");
-
-    return OK;
-}
-
-
-
-
-
-/******************************************************************************
- * File: benchmarkPerf.c
- *
- * Description:
- *   Demonstrates how to measure elapsed time in nanoseconds for a function
- *   called "performancePd()" using a user-provided "getimenano()" function.
- *   Results are shown in a simple table.
- *
- * Usage Steps:
- *   1. Provide your own implementations (or declarations) of:
- *      - uint64_t getimenano(void);
- *      - void performancePd(void);
- *   2. Compile/link this file in your environment (VxWorks or otherwise).
- *   3. Call benchmarkPerformancePd(<iterations>) to run the test.
- ******************************************************************************/
-
-#include <stdio.h>    /* printf */
-#include <stdint.h>   /* uint64_t */
-#include <stdlib.h>   /* malloc, free */
-
-/* 
- * Declare your existing functions so the compiler knows about them.
- * These must be defined elsewhere in your project.
- */
-extern uint64_t getimenano(void);
-extern void performancePd(void);
-
-/**
- * benchmarkPerformancePd:
- *   - Runs 'performancePd()' for the specified number of iterations.
- *   - Uses getimenano() before and after each call to measure elapsed time.
- *   - Prints individual times and basic stats (min, max, average).
- */
-void benchmarkPerformancePd(int iterations)
-{
-    if (iterations <= 0)
-    {
-        printf("Error: iterations must be > 0.\n");
-        return;
-    }
-
-    /* Allocate array to hold each measurement */
-    uint64_t *measurements = (uint64_t *)malloc(sizeof(uint64_t) * iterations);
-    if (measurements == NULL)
-    {
-        printf("Error: could not allocate memory for measurements.\n");
-        return;
-    }
-
-    printf("\n========================================\n");
-    printf("     Benchmarking performancePd()       \n");
-    printf("   (Using getimenano() for timing)      \n");
-    printf("========================================\n");
-    printf(" Iteration |   Elapsed time (ns)\n");
-    printf("----------------------------------------\n");
-
-    for (int i = 0; i < iterations; i++)
-    {
-        /* Record start time in nanoseconds */
-        uint64_t startTime = getimenano();
-
-        /* Call the function we’re measuring */
-        performancePd();
-
-        /* Record end time in nanoseconds */
-        uint64_t endTime = getimenano();
-
-        /* Elapsed time for this iteration */
-        measurements[i] = endTime - startTime;
-
-        /* Print result for this iteration */
-        printf(" %9d | %llu\n", i + 1, (unsigned long long)measurements[i]);
-    }
-
-    /* Compute min, max, and average */
-    uint64_t sum = 0;
-    uint64_t minTime = (uint64_t)-1;  /* Start with large number (all bits = 1) */
-    uint64_t maxTime = 0;
-    for (int i = 0; i < iterations; i++)
-    {
-        uint64_t val = measurements[i];
-        sum += val;
-        if (val < minTime) { minTime = val; }
-        if (val > maxTime) { maxTime = val; }
-    }
-    double avgTime = (double)sum / (double)iterations;
-
-    printf("----------------------------------------\n");
-    printf(" Min time (ns):  %llu\n", (unsigned long long)minTime);
-    printf(" Max time (ns):  %llu\n", (unsigned long long)maxTime);
-    printf(" Avg time (ns):  %.2f\n", avgTime);
-    printf("========================================\n\n");
-
-    free(measurements);
-}
-
-/******************************************************************************
- * Example placeholders for getimenano() and performancePd().
- * Remove or replace these stubs with your real implementations!
- ******************************************************************************/
-#if 0  /* REMOVE or comment out if you already have actual definitions elsewhere */
-
-/* Example (dummy) getimenano() - returns a monotonic counter in ns */
-uint64_t getimenano(void)
-{
-    static uint64_t dummyCounter = 0;
-    dummyCounter += 1234567; /* increment by 1.234567 ms worth of ns for example */
-    return dummyCounter;
-}
-
-/* Example (dummy) performancePd() - some short workload */
-void performancePd(void)
-{
-    volatile int sum = 0;
-    for (int i = 0; i < 1000; i++)
-    {
-        sum += i;
-    }
-}
-
-#endif
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
@@ -2542,4 +617,861 @@ int main() {
 
 
 #endif // ABENCHMARK_H
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#ifndef ABENCHMARK_H
+#define ABENCHMARK_H
+
+#include <algorithm>
+#include <chrono>
+#include <cstdint>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <memory>
+#include <mutex>
+#include <numeric>
+#include <sstream>
+#include <string>
+#include <vector>
+#include <windows.h>
+
+#if defined(_MSC_VER)
+#include <intrin.h>   // MSVC - For __rdtsc
+#else
+#include <x86intrin.h>  // GCC/Clang on x86
+#endif
+
+// Default CPU frequency if not provided
+#ifndef CPU_FREQ
+#define CPU_FREQ 3.0e9  // e.g., 3.0 GHz CPU
+#endif
+
+// Uncomment to use RDTSC instead of std::chrono
+// #define CLOCK_SOURCE_RDTSC
+
+#ifdef CLOCK_SOURCE_RDTSC
+#define GET_TIME() __rdtsc()
+#define CALCULATE_TIME_NS(end, start) \
+  (static_cast<double>((end) - (start)) / CPU_FREQ * 1.0e9)
+typedef uint64_t CLOCK_TYPE;
+#else
+#define GET_TIME() std::chrono::high_resolution_clock::now()
+typedef std::chrono::time_point<std::chrono::high_resolution_clock> CLOCK_TYPE;
+#define CALCULATE_TIME_NS(end, start) \
+  (std::chrono::duration_cast<std::chrono::nanoseconds>((end) - (start)).count())
+#endif
+
+// Default number of runs if not specified by the user
+#ifndef BENCH_NUMBER_OF_RUN
+#define BENCH_NUMBER_OF_RUN 1000
+#endif
+
+namespace Abench {
+
+/**
+ * @class Mutex
+ * @brief A simple RAII-friendly mutex wrapper.
+ */
+class Mutex {
+ public:
+  Mutex() = default;
+  void lock()   { lock_guard_.lock(); }
+  void unlock() { lock_guard_.unlock(); }
+
+ private:
+  std::mutex lock_guard_;
+};
+
+/**
+ * @struct Stats
+ * @brief Holds benchmark statistics for a single benchmark run.
+ */
+struct Stats {
+  double min_ns;
+  double max_ns;
+  double mean_ns;
+};
+
+/**
+ * @class State
+ * @brief Stores iteration state and timing info for each iteration.
+ */
+class State {
+ public:
+  /**
+   * @param n Number of iterations for this benchmark.
+   */
+  explicit State(int n)
+      : iteration_count_(n), manual_(false) {
+    durations_ns_.reserve(n);
+  }
+
+  /**
+   * @struct TimerProxy
+   * @brief RAII object that measures time of a single iteration if manual mode is not enabled.
+   */
+  struct TimerProxy {
+    TimerProxy(std::vector<double>& durations,
+               bool manual,
+               CLOCK_TYPE& start_manual_ref)
+        : durations_ns_(durations),
+          manual_mode_(manual),
+          start_manual_(start_manual_ref) {
+      start_ = GET_TIME();
+    }
+
+    ~TimerProxy() {
+      CLOCK_TYPE end_time = GET_TIME();
+      if (!manual_mode_) {
+        double ns = CALCULATE_TIME_NS(end_time, start_);
+        durations_ns_.push_back(ns);
+      } else {
+        // If manual mode, store start time for user to explicitly stop later
+        start_manual_ = start_;
+      }
+    }
+
+   private:
+    std::vector<double>& durations_ns_;
+    bool manual_mode_;
+    CLOCK_TYPE start_;
+    CLOCK_TYPE& start_manual_;
+  };
+
+  /**
+   * @class Iterator
+   * @brief Custom iterator used in range-based for loops: for (auto _ : state) {...}
+   */
+  class Iterator {
+   public:
+    Iterator(int index, State& st)
+        : index_(index), state_(st) {}
+
+    bool operator!=(const Iterator& other) const {
+      return index_ != other.index_;
+    }
+
+    Iterator& operator++() {
+      ++index_;
+      return *this;
+    }
+
+    TimerProxy operator*() {
+      return TimerProxy(state_.durations_ns_,
+                        state_.manual_,
+                        state_.start_manual_);
+    }
+
+   private:
+    int index_;
+    State& state_;
+  };
+
+  // Begin and end for range-based for
+  Iterator begin() { return Iterator(0, *this); }
+  Iterator end()   { return Iterator(iteration_count_, *this); }
+
+  /**
+   * @brief Begin manual timing for a single iteration block.
+   */
+  void StartTimer() {
+    manual_ = true;
+    start_manual_ = GET_TIME();
+  }
+
+  /**
+   * @brief Stop manual timing for a single iteration block.
+   */
+  void StopTimer() {
+    CLOCK_TYPE end_time = GET_TIME();
+    double ns = CALCULATE_TIME_NS(end_time, start_manual_);
+    durations_ns_.push_back(ns);
+  }
+
+  /**
+   * @brief Compute min, max, mean of the recorded durations.
+   * @return Stats struct with min_ns, max_ns, mean_ns
+   */
+  Stats getStats() const {
+    Stats s = {0.0, 0.0, 0.0};
+    if (durations_ns_.empty()) {
+      return s;
+    }
+
+    // Min/Max
+    std::pair<std::vector<double>::const_iterator,
+              std::vector<double>::const_iterator> mm
+        = std::minmax_element(durations_ns_.begin(), durations_ns_.end());
+    s.min_ns = *mm.first;
+    s.max_ns = *mm.second;
+
+    // Mean
+    double sum_val =
+        std::accumulate(durations_ns_.begin(), durations_ns_.end(), 0.0);
+    s.mean_ns = sum_val / durations_ns_.size();
+
+    return s;
+  }
+
+  int GetIterations() const {
+    return iteration_count_;
+  }
+
+ private:
+  int iteration_count_;
+  bool manual_;
+  std::vector<double> durations_ns_;
+  CLOCK_TYPE start_manual_;
+};
+
+/**
+ * @class Benchmark
+ * @brief Base interface for all user-defined benchmarks.
+ */
+class Benchmark {
+ public:
+  explicit Benchmark(const std::string& name)
+      : name_(name), iterations_(BENCH_NUMBER_OF_RUN) {}
+
+  Benchmark* Name(const std::string& n) {
+    name_ = n;
+    return this;
+  }
+
+  Benchmark* Iterations(size_t it) {
+    iterations_ = it;
+    return this;
+  }
+
+  const std::string& GetName() const {
+    return name_;
+  }
+
+  size_t GetIterations() const {
+    return iterations_;
+  }
+
+  virtual void Run(State& st) = 0;
+  virtual ~Benchmark() {}
+
+ private:
+  std::string name_;
+  size_t iterations_;
+};
+
+// Function pointer signature
+typedef void (Function)(State&);
+
+/**
+ * @class FunctionBenchmark
+ * @brief Invokes a user-provided function for each iteration.
+ */
+class FunctionBenchmark : public Benchmark {
+ public:
+  FunctionBenchmark(const std::string& name, Function* func)
+      : Benchmark(name), func_(func) {}
+
+  void Run(State& st) override {
+    func_(st);
+  }
+
+ private:
+  Function* func_;
+};
+
+/**
+ * @class BenchmarkRegister
+ * @brief Singleton that stores all benchmarks and provides a place to run them.
+ */
+class BenchmarkRegister {
+ public:
+  static BenchmarkRegister* GetInstance() {
+    static BenchmarkRegister instance;
+    return &instance;
+  }
+
+  Benchmark* AddBenchmark(std::unique_ptr<Benchmark> b) {
+    mutex_.lock();
+    benchmarks_.push_back(std::move(b));
+    mutex_.unlock();
+    return benchmarks_.back().get();
+  }
+
+  void Clear() {
+    mutex_.lock();
+    benchmarks_.clear();
+    benchmarks_.shrink_to_fit();
+    mutex_.unlock();
+  }
+
+  std::vector<std::unique_ptr<Benchmark>> benchmarks_;
+
+ private:
+  BenchmarkRegister() {}
+  Mutex mutex_;
+};
+
+/**
+ * @brief Helper to register a new benchmark (ownership transferred).
+ */
+inline Benchmark* RegisterBenchmarkInternal(Benchmark* b) {
+  std::unique_ptr<Benchmark> ptr(b);
+  return BenchmarkRegister::GetInstance()->AddBenchmark(std::move(ptr));
+}
+
+/**
+ * @brief Initialize the benchmark environment (e.g., set thread affinity).
+ */
+inline void Initialize() {
+  // Example: pin thread to CPU #2
+  HANDLE thread = GetCurrentThread();
+  DWORD_PTR affinity_mask = 4; // CPU #2 on Windows
+  DWORD_PTR result = SetThreadAffinityMask(thread, affinity_mask);
+  if (result == 0) {
+    std::cerr << "Failed to set thread affinity. Error: "
+              << GetLastError() << std::endl;
+  } else {
+    std::cout << "Thread affinity set to CPU #2 (mask=4).\n";
+  }
+}
+
+/**
+ * @struct BenchResult
+ * @brief Holds final stats for printing or exporting.
+ */
+struct BenchResult {
+  std::string name;
+  size_t iterations;
+  double min_ns;
+  double max_ns;
+  double mean_ns;
+};
+
+/**
+ * @enum OutputFormat
+ * @brief Specifies the type of file output to produce, if any.
+ */
+enum class OutputFormat {
+  None,
+  JSON,
+  CSV
+};
+
+// Global output config
+static OutputFormat g_format = OutputFormat::None;
+static std::string g_fileName;
+
+/**
+ * @brief User sets the output format ("csv" or "json") and file name.
+ *        If format is neither "csv" nor "json", we disable file output.
+ */
+inline void SetOutputFormat(const std::string& format, const std::string& fileName) {
+  if (format == "csv") {
+    g_format   = OutputFormat::CSV;
+    g_fileName = fileName;
+  } else if (format == "json") {
+    g_format   = OutputFormat::JSON;
+    g_fileName = fileName;
+  } else {
+    // No recognized format => no file output
+    g_format   = OutputFormat::None;
+    g_fileName.clear();
+  }
+}
+
+/**
+ * @brief Writes results in JSON format to the given stream.
+ */
+inline void WriteJson(std::ostream& os, const std::vector<BenchResult>& results) {
+  os << "[\n";
+  for (size_t i = 0; i < results.size(); ++i) {
+    const BenchResult& r = results[i];
+    os << "  {\n"
+       << "    \"Benchmark\": \"" << r.name << "\",\n"
+       << "    \"Iterations\": " << r.iterations << ",\n"
+       << "    \"Min(ns)\": " << std::fixed << std::setprecision(2) << r.min_ns << ",\n"
+       << "    \"Max(ns)\": " << r.max_ns << ",\n"
+       << "    \"Mean(ns)\": " << r.mean_ns << "\n"
+       << "  }";
+    if (i + 1 < results.size()) {
+      os << ",";
+    }
+    os << "\n";
+  }
+  os << "]\n";
+}
+
+/**
+ * @brief Writes results in CSV format to the given stream.
+ */
+inline void WriteCsv(std::ostream& os, const std::vector<BenchResult>& results) {
+  os << "Benchmark,Iterations,Min(ns),Max(ns),Mean(ns)\n";
+  for (size_t i = 0; i < results.size(); ++i) {
+    const BenchResult& r = results[i];
+    if (r.mean_ns <= 0.0) {
+      os << r.name << "," << r.iterations << ",-,-,-\n";
+    } else {
+      os << r.name << "," << r.iterations << ","
+         << std::fixed << std::setprecision(2) << r.min_ns << ","
+         << r.max_ns << "," << r.mean_ns << "\n";
+    }
+  }
+}
+
+/**
+ * @brief Print the results in a table (Google Benchmark–like),
+ *        using dynamic column widths for large numeric values.
+ */
+inline void PrintTable(const std::vector<BenchResult>& results) {
+  // Column headers
+  const std::string titleName = "Benchmark";
+  const std::string titleIter = "Iterations";
+  const std::string titleMin  = "Min(ns)";
+  const std::string titleMax  = "Max(ns)";
+  const std::string titleMean = "Mean(ns)";
+
+  // We'll convert each row to strings, track max widths.
+  struct Row {
+    std::string name;
+    std::string iter;
+    std::string minv;
+    std::string maxv;
+    std::string meanv;
+  };
+
+  // Store rows
+  std::vector<Row> table;
+  table.reserve(results.size());
+
+  // Track max column width for each column
+  size_t maxNameWidth  = titleName.size();
+  size_t maxIterWidth  = titleIter.size();
+  size_t maxMinWidth   = titleMin.size();
+  size_t maxMaxWidth   = titleMax.size();
+  size_t maxMeanWidth  = titleMean.size();
+
+  // Helper to format a double with 2 decimals
+  auto fmt = [](double val) -> std::string {
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(2) << val;
+    return oss.str();
+  };
+
+  // Build table rows
+  for (size_t i = 0; i < results.size(); ++i) {
+    const BenchResult& r = results[i];
+
+    Row row;
+    // 1) Benchmark name
+    row.name = r.name;
+    if (row.name.size() > maxNameWidth) {
+      maxNameWidth = row.name.size();
+    }
+
+    // 2) Iterations
+    row.iter = std::to_string(r.iterations);
+    if (row.iter.size() > maxIterWidth) {
+      maxIterWidth = row.iter.size();
+    }
+
+    // 3) Min, Max, Mean
+    if (r.mean_ns <= 0.0) {
+      row.minv  = "-";
+      row.maxv  = "-";
+      row.meanv = "-";
+    } else {
+      row.minv  = fmt(r.min_ns);
+      row.maxv  = fmt(r.max_ns);
+      row.meanv = fmt(r.mean_ns);
+
+      if (row.minv.size()  > maxMinWidth)  maxMinWidth  = row.minv.size();
+      if (row.maxv.size()  > maxMaxWidth)  maxMaxWidth  = row.maxv.size();
+      if (row.meanv.size() > maxMeanWidth) maxMeanWidth = row.meanv.size();
+    }
+    table.push_back(row);
+  }
+
+  // A small padding between columns
+  const size_t pad = 2;
+  // Compute total line width
+  size_t totalWidth =
+      maxNameWidth + maxIterWidth + maxMinWidth + maxMaxWidth + maxMeanWidth
+      + (4 * pad);
+  // Minimum for aesthetics
+  if (totalWidth < 80) {
+    totalWidth = 80;
+  }
+
+  // Helper to print a separator line
+  auto printSep = [&](std::ostream& os) {
+    os << std::string(totalWidth, '-') << "\n";
+  };
+
+  // Print table
+  printSep(std::cout);
+
+  // Print header
+  // Benchmark name is left-aligned, numeric columns are right-aligned
+  std::cout
+    << std::left  << std::setw(static_cast<int>(maxNameWidth)) << titleName
+    << std::string(pad, ' ')
+    << std::right << std::setw(static_cast<int>(maxIterWidth)) << titleIter
+    << std::string(pad, ' ')
+    << std::right << std::setw(static_cast<int>(maxMinWidth))  << titleMin
+    << std::string(pad, ' ')
+    << std::right << std::setw(static_cast<int>(maxMaxWidth))  << titleMax
+    << std::string(pad, ' ')
+    << std::right << std::setw(static_cast<int>(maxMeanWidth)) << titleMean
+    << "\n";
+
+  printSep(std::cout);
+
+  // Print rows
+  for (size_t i = 0; i < table.size(); ++i) {
+    const Row& row = table[i];
+
+    std::cout
+      << std::left  << std::setw(static_cast<int>(maxNameWidth)) << row.name
+      << std::string(pad, ' ')
+      << std::right << std::setw(static_cast<int>(maxIterWidth)) << row.iter
+      << std::string(pad, ' ')
+      << std::right << std::setw(static_cast<int>(maxMinWidth))  << row.minv
+      << std::string(pad, ' ')
+      << std::right << std::setw(static_cast<int>(maxMaxWidth))  << row.maxv
+      << std::string(pad, ' ')
+      << std::right << std::setw(static_cast<int>(maxMeanWidth)) << row.meanv
+      << "\n";
+  }
+
+  printSep(std::cout);
+}
+
+/**
+ * @brief Run all registered benchmarks, print table to stdout, and optionally
+ *        write JSON or CSV results to a file if the user specified an output format.
+ */
+inline void RunAll() {
+  BenchmarkRegister* instance = BenchmarkRegister::GetInstance();
+  std::vector<BenchResult> results;
+  results.reserve(instance->benchmarks_.size());
+
+  // 1) Run each benchmark, gather stats
+  for (size_t i = 0; i < instance->benchmarks_.size(); ++i) {
+    Benchmark* bench = instance->benchmarks_[i].get();
+    State st(static_cast<int>(bench->GetIterations()));
+    bench->Run(st);
+
+    Stats s = st.getStats();
+    BenchResult r;
+    r.name       = bench->GetName();
+    r.iterations = bench->GetIterations();
+    r.min_ns     = s.min_ns;
+    r.max_ns     = s.max_ns;
+    r.mean_ns    = s.mean_ns;
+
+    results.push_back(r);
+  }
+
+  // 2) Print dynamic table to stdout
+  PrintTable(results);
+
+  // 3) If user specified a format + file name, write to that file
+  if (g_format != OutputFormat::None && !g_fileName.empty()) {
+    std::ofstream ofs(g_fileName.c_str());
+    if (!ofs) {
+      std::cerr << "Error: Unable to open file '" << g_fileName
+                << "' for writing.\n";
+      return;
+    }
+    switch (g_format) {
+      case OutputFormat::CSV:
+        WriteCsv(ofs, results);
+        break;
+      case OutputFormat::JSON:
+        WriteJson(ofs, results);
+        break;
+      default:
+        break;
+    }
+    ofs.close();
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Macros for registering benchmarks
+// -----------------------------------------------------------------------------
+#ifdef __GNUC__
+#define BENCHMARK_UNUSED __attribute__((unused))
+#else
+#define BENCHMARK_UNUSED
+#endif
+
+// We use __LINE__ to generate unique variable names in C++14
+#define BENCHMARK_PRIVATE_CONCAT(a, b) a##b
+#define BENCHMARK_PRIVATE_NAME(line) BENCHMARK_PRIVATE_CONCAT(benchmark_unique_, line)
+
+/**
+ * @brief Create and register a FunctionBenchmark.
+ * Usage: BENCHMARK(MyFunction)->Name("Test")->Iterations(5);
+ */
+#define BENCHMARK(func) \
+  static ::Abench::Benchmark* BENCHMARK_PRIVATE_NAME(__LINE__) BENCHMARK_UNUSED = \
+      ::Abench::RegisterBenchmarkInternal( \
+          new ::Abench::FunctionBenchmark(#func, func))
+
+}  // namespace Abench
+
+#endif  // ABENCHMARK_H
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <iostream>
+#include <random>
+#include <string>
+#include <vector>
+
+// Include your ABenchmark header (adjust path as needed)
+#include "ABenchmark.h"
+
+/******************************************************************************
+ * 1) Integer arithmetic (auto-timed)
+ ******************************************************************************/
+static void BM_IntArithmetic(Abench::State& state) {
+  for (auto _ : state) {
+    volatile int sum = 0;
+    for (int i = 0; i < 1000000; ++i) {
+      sum += (i * 2) - (i / 2);
+    }
+  }
+}
+BENCHMARK(BM_IntArithmetic)->Name("IntArithmetic")->Iterations(10);
+
+/******************************************************************************
+ * 2) Floating-point math (auto-timed)
+ ******************************************************************************/
+static void BM_FloatMath(Abench::State& state) {
+  for (auto _ : state) {
+    volatile double val = 0.0;
+    for (int i = 0; i < 500000; ++i) {
+      val += std::sqrt(i) * std::sin(i) + std::cos(i / 100.0);
+    }
+  }
+}
+BENCHMARK(BM_FloatMath)->Name("FloatMath")->Iterations(10);
+
+/******************************************************************************
+ * 3) Memory Allocations (auto-timed)
+ ******************************************************************************/
+static void BM_MemoryAllocs(Abench::State& state) {
+  for (auto _ : state) {
+    for (int i = 0; i < 100000; ++i) {
+      char* ptr = new char[64];
+      ptr[0] = static_cast<char>(i);
+      delete[] ptr;
+    }
+  }
+}
+BENCHMARK(BM_MemoryAllocs)->Name("MemoryAllocs")->Iterations(10);
+
+/******************************************************************************
+ * 4) String manipulation (auto-timed)
+ ******************************************************************************/
+static void BM_StringManip(Abench::State& state) {
+  std::mt19937 rng(12345);
+  std::uniform_int_distribution<int> dist(0, 25);
+
+  for (auto _ : state) {
+    std::string base("BenchmarkTest");
+    for (int i = 0; i < 50000; ++i) {
+      std::string tmp;
+      for (int j = 0; j < 5; ++j) {
+        tmp.push_back(static_cast<char>('a' + dist(rng)));
+      }
+      base += tmp;
+      if (base.size() > 10000) {
+        base.resize(100);
+      }
+    }
+  }
+}
+BENCHMARK(BM_StringManip)->Name("StringManip")->Iterations(10);
+
+/******************************************************************************
+ * 5) Sorting a large vector (manual-timed), excluding data setup
+ ******************************************************************************/
+static void BM_SortLargeVector(Abench::State& state) {
+  std::vector<int> data(2000000);  // 2 million elements
+  std::mt19937 rng(54321);
+  std::uniform_int_distribution<int> dist(0, 1000000);
+  for (auto& d : data) {
+    d = dist(rng);
+  }
+
+  for (int i = 0; i < state.GetIterations(); ++i) {
+    std::vector<int> temp = data;
+
+    state.StartTimer();
+    std::sort(temp.begin(), temp.end());
+    state.StopTimer();
+  }
+}
+BENCHMARK(BM_SortLargeVector)->Name("SortLargeVector")->Iterations(5);
+
+/******************************************************************************
+ * 6) Mixed work (auto-timed)
+ ******************************************************************************/
+static void BM_MixedWork(Abench::State& state) {
+  for (auto _ : state) {
+    // Some integer arithmetic
+    volatile int int_sum = 0;
+    for (int i = 0; i < 50000; ++i) {
+      int_sum += i;
+    }
+
+    // Some floating point
+    volatile double float_val = 0.0;
+    for (int i = 1; i < 50000; ++i) {
+      float_val += std::log(static_cast<double>(i));
+    }
+
+    // A small memory allocation
+    char* p = new char[1024];
+    p[0] = 'x';
+    delete[] p;
+  }
+}
+BENCHMARK(BM_MixedWork)->Name("MixedWork")->Iterations(10);
+
+/******************************************************************************
+ * 7) Manual timing INSIDE a range-based loop
+ *    Demonstrates measuring PART of each iteration while ignoring the rest.
+ ******************************************************************************/
+static void BM_ManualInsideRange(Abench::State& state) {
+  // This approach can be useful if you only want to measure
+  // *some* code inside each iteration, while ignoring other code.
+
+  for (auto _ : state) {
+    // 1) Some code you DON'T want to measure
+    volatile int outsideWork = 0;
+    for (int i = 0; i < 1000; ++i) {
+      outsideWork += i;
+    }
+
+    // 2) Now measure just this part
+    state.StartTimer();
+    {
+      // For instance, do a mini memory allocation
+      char* ptr = new char[10000];
+      for (int i = 0; i < 10000; ++i) {
+        ptr[i] = static_cast<char>(i & 0xFF);
+      }
+      delete[] ptr;
+    }
+    state.StopTimer();
+
+    // 3) Some extra work again outside the timed region
+    volatile double extra = 0;
+    for (int i = 0; i < 1000; ++i) {
+      extra += std::sqrt(i);
+    }
+  }
+}
+BENCHMARK(BM_ManualInsideRange)->Name("ManualInsideRange")->Iterations(5);
+
+/******************************************************************************
+ * MAIN FUNCTION
+ * Demonstrate how to set up the environment, optionally specify CSV or JSON
+ * output, and run all benchmarks. The user can customize iteration counts
+ * above.
+ ******************************************************************************/
+int main() {
+  // (Optional) Pin the thread or any environment setup
+  Abench::Initialize();
+
+  // Optionally, produce CSV/JSON output in addition to stdout table:
+   Abench::SetOutputFormat("csv",  "benchmark_results.csv");
+
+  // Now run all registered benchmarks.
+  Abench::RunAll();
+
+  return 0;
+}
+
+
 
