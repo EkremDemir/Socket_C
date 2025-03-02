@@ -1,682 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-#ifndef ABENCHMARK_H
-#define ABENCHMARK_H
-
-#include <iostream>
-#include <memory>
-#include <string>
-#include <vector>
-#include <algorithm>
-#include <numeric>
-#include <mutex>
-#include <cstdint>   // for uint64_t
-#include <windows.h>
-// For __rdtsc intrinsic
-#if defined(_MSC_VER)
-#include <intrin.h>  // MSVC
-#else
-#include <x86intrin.h> // GCC/Clang on x86
-#endif
-
-// Set a default CPU frequency if not provided
-#ifndef CPU_FREQ
-#define CPU_FREQ 3.0e9  // e.g., 3.0 GHz CPU
-#endif
-
-// If you want a quick macro for reading TSC
-#ifndef GET_TIME
-#endif
-
-//#undef CLOCK_SOURCE_RDTSC
-//#define CLOCK_SOURCE_RDTSC
-
-#ifdef CLOCK_SOURCE_RDTSC
-#define GET_TIME()  __rdtsc()
-#define CALCULATE_TIME_NS(end, start) ((static_cast<double>(end - start) / CPU_FREQ) * 1.0e9);
-typedef  uint64_t CLOCK_TYPE;
-#else 
-#define GET_TIME()  std::chrono::high_resolution_clock::now()
-typedef  std::chrono::time_point<std::chrono::high_resolution_clock> CLOCK_TYPE;
-#define CALCULATE_TIME_NS(end, start)   \
-    static_cast<double>(std::chrono::duration_cast<std::chrono::nanoseconds> (end - start).count());
-#endif
-//Default number of run
-#define BENCH_NUMBER_OF_RUN 1000
-
-namespace Abench {
-
-// Forward declarations
-class Mutex;
-class Benchmark;
-class FunctionBenchmark;
-class State;
-class BenchmarkRegister;
-
-
-// -----------------------------------------------------------------------------
-// 5) Mutex class
-// -----------------------------------------------------------------------------
-class Mutex {
-    public:
-        Mutex() {}
-        void lock() { std::lock_guard<std::mutex> lock(mut_); }
-        void unlock() { mut_.unlock(); }
-    
-    private:
-        std::mutex mut_;
-    };
-
-// -----------------------------------------------------------------------------
-// 1) The State class with RDTSC-based measurement
-// -----------------------------------------------------------------------------
-class State {
-public:
-    explicit State(int n) : count_(n) {
-        durations_.reserve(n);
-    }
-
-    // TimerProxy uses RDTSC in constructor & destructor
-    struct TimerProxy {
-        explicit TimerProxy(std::vector<double>& vec)
-          : start_(GET_TIME()), vec_(vec)
-        {
-            // If you want to serialize here, you could do something like:
-            // int info[4];
-            // __cpuid(info, 0); // This ensures the pipeline is serialized before measuring
-        }
-
-        ~TimerProxy() {
-            decltype(start_) endCycles = GET_TIME();
-
-            auto ns = CALCULATE_TIME_NS(endCycles, start_);
-            
-            vec_.push_back(ns);
-        }
-
-    private:
-        CLOCK_TYPE start_;
-        std::vector<double>& vec_;
-    };
-
-    // The Iterator that creates a TimerProxy each iteration
-    class Iterator {
-    public:
-        Iterator(int idx, State& st) : idx_(idx), state_(st) {}
-        bool operator!=(const Iterator& other) const { return idx_ != other.idx_; }
-        Iterator& operator++() { ++idx_; return *this; }
-
-        // Each dereference starts a TimerProxy for that iteration
-        TimerProxy operator*() { return TimerProxy(state_.durations_); }
-    private:
-        int idx_;
-        State& state_;
-    };
-
-    // Range-based for
-    Iterator begin() { return Iterator(0, *this); }
-    Iterator end()   { return Iterator(count_, *this); }
-
-    // Print min, max, and average (in nanoseconds)
-    void printStats() const {
-        if (durations_.empty()) {
-            std::cout << "No iterations recorded.\n";
-            return;
-        }
-        auto mm = std::minmax_element(durations_.begin(), durations_.end());
-        double minv = *mm.first;
-        double maxv = *mm.second;
-        double sumv = std::accumulate(durations_.begin(), durations_.end(), 0.0);
-        double mean = sumv / durations_.size();
-
-        std::cout << "Iterations: " << durations_.size() << "\n"
-                  << "Min: " << minv << " ns\n"
-                  << "Max: " << maxv << " ns\n"
-                  << "Avg: " << mean << " ns\n";
-    }
-
-private:
-    int count_;
-    std::vector<double> durations_;
-};
-
-// -----------------------------------------------------------------------------
-// 2) Base Benchmark class
-// -----------------------------------------------------------------------------
-class Benchmark {
-public:
-    explicit Benchmark(const std::string& name)
-      : name_(name), iterations_(BENCH_NUMBER_OF_RUN) {}
-
-    Benchmark* Name(const std::string& n) {
-        name_ = n;
-        return this;
-    }
-    Benchmark* Iterations(size_t it) {
-        iterations_ = it;
-        return this;
-    }
-
-    const std::string& GetName() const    { return name_; }
-    size_t GetIterations() const          { return iterations_; }
-
-    // Must be overridden by subclasses
-    virtual void Run(State& st) = 0;
-    virtual ~Benchmark() {}
-
-private:
-    std::string name_;
-    size_t iterations_;
-};
-
-// Typedef for a user function that takes State&
-typedef void (Function)(State&);
-
-// -----------------------------------------------------------------------------
-// 3) A derived Benchmark that calls a user function
-// -----------------------------------------------------------------------------
-class FunctionBenchmark : public Benchmark {
-public:
-    FunctionBenchmark(const std::string& name, Function* func)
-      : Benchmark(name), func_(func) {}
-
-    void Run(State& st) override {
-        // The user function does for (auto _ : st) { ... }
-        func_(st);
-    }
-
-private:
-    Function* func_;
-};
-
-// -----------------------------------------------------------------------------
-// 4) BenchmarkRegister singleton
-// -----------------------------------------------------------------------------
-class BenchmarkRegister {
-public:
-    static BenchmarkRegister* GetInstance() {
-        static BenchmarkRegister instance;
-        return &instance;
-    }
-
-    Benchmark* AddBenchmark(std::unique_ptr<Benchmark> b) {
-        mutex_.lock();
-        benchmarks_.push_back(std::move(b));
-        return benchmarks_.back().get();
-    }
-
-    void Clear() {
-        mutex_.lock();
-        benchmarks_.clear();
-        benchmarks_.shrink_to_fit();
-    }
-
-public:
-std::vector<std::unique_ptr<Benchmark>> benchmarks_;
-
-private:
-    BenchmarkRegister() = default;
-    Mutex mutex_;
-};
-
-// -----------------------------------------------------------------------------
-// 5) Helper to register a new Benchmark
-// -----------------------------------------------------------------------------
-inline Benchmark* RegisterBenchmarkInternal(Benchmark* b) {
-    std::unique_ptr<Benchmark> up(b);
-    return BenchmarkRegister::GetInstance()->AddBenchmark(std::move(up));
-}
-
-
-void Initialize()
-{
-    // Get the handle to the current thread
-    HANDLE thread = GetCurrentThread();
-
-    // Set the thread affinity to CPU 0 (first core)
-    DWORD_PTR affinityMask = 4; // CPU 0
-    DWORD_PTR result = SetThreadAffinityMask(thread, affinityMask);
-
-    if (result == 0) {
-        std::cerr << "Failed to set thread affinity. Error: " << GetLastError() << std::endl;
-    } else {
-        std::cout << "Thread affinity set to CPU 0." << std::endl;
-    }
-
-
-}
-
-
-
-void RunAll() {
-
-    //Get the In staces of the benchmark register
-    BenchmarkRegister*  instance = BenchmarkRegister::GetInstance();
-
-    //Run each benchmark
-    for (auto& bench : instance->benchmarks_) {
-        std::cout << "Benchmark: " << bench->GetName() << std::endl;
-        State st(static_cast<int>(bench->GetIterations()));
-        bench->Run(st);
-        st.printStats();
-        std::cout << "----------------------------------\n";
-    }
-}
-    
-// -----------------------------------------------------------------------------
-// 6) Advanced Macro approach for registering at global scope
-// -----------------------------------------------------------------------------
-
-#ifdef BENCHMARK_HAS_CXX17
-#define BENCHMARK_UNUSED [[maybe_unused]]
-#elif defined(__GNUC__) || defined(__clang__)
-#define BENCHMARK_UNUSED __attribute__((unused))
-#else
-#define BENCHMARK_UNUSED
-#endif
-
-#if defined(__COUNTER__) && (__COUNTER__ + 1 == __COUNTER__ + 0)
-#define BENCHMARK_PRIVATE_UNIQUE_ID __COUNTER__
-#endif
-
-#define BENCHMARK_PRIVATE_NAME(...)                                      \
-  BENCHMARK_PRIVATE_CONCAT(benchmark_uniq_, BENCHMARK_PRIVATE_UNIQUE_ID, \
-                           __VA_ARGS__)
-
-#define BENCHMARK_PRIVATE_CONCAT(a, b, c) BENCHMARK_PRIVATE_CONCAT2(a, b, c)
-#define BENCHMARK_PRIVATE_CONCAT2(a, b, c) a##b##c
-
-#define BENCHMARK_PRIVATE_DECLARE(n)                                      \
-  /* NOLINTNEXTLINE(misc-use-anonymous-namespace) */                      \
-  static ::Abench::Benchmark* BENCHMARK_PRIVATE_NAME(n) BENCHMARK_UNUSED
-
-// Macro the user calls: e.g., BENCHMARK(MyFunction)->Name("Test")->Iterations(5);
-#define BENCHMARK(func) \
-  BENCHMARK_PRIVATE_DECLARE(_benchmark_) = ::Abench::RegisterBenchmarkInternal( \
-      new ::Abench::FunctionBenchmark(#func, func))
-
-} // namespace Abench
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-/*
-#include <iostream>
-#include <functional>
-#include <vector>
-#include <string>
-#include <algorithm>
-#include <numeric>
-#include <cmath>
-#include <cstdint>
-#include <x86intrin.h> // For __rdtsc intrinsic
-
-#define CPU_FREQ 3.0e9 // Adjust this to your CPU frequency in Hz
-#define GET_TIME() __rdtsc()
-
-struct BenchmarkInfo {
-    std::string name;
-    std::function<void()> func;
-    size_t iterations;
-};
-
-class BenchmarkRunner {
-private:
-    std::vector<BenchmarkInfo> benchmarks;
-
-public:
-    static BenchmarkRunner& instance() {
-        static BenchmarkRunner runner;
-        return runner;
-    }
-
-    void registerBenchmark(const std::string& name, std::function<void()> func, size_t iterations = 1000) {
-        benchmarks.push_back({name, func, iterations});
-    }
-
-    void runAll() {
-        for (const auto& b : benchmarks) {
-            std::vector<double> times;
-            for (size_t i = 0; i < b.iterations; ++i) {
-                uint64_t start = GET_TIME();
-                b.func();
-                uint64_t end = GET_TIME();
-                double time_ns = (end - start) * (1.0e9 / CPU_FREQ);
-                times.push_back(time_ns);
-            }
-
-            double min_time = *std::min_element(times.begin(), times.end());
-            double max_time = *std::max_element(times.begin(), times.end());
-            double mean = std::accumulate(times.begin(), times.end(), 0.0) / times.size();
-            double sum_of_squares = std::accumulate(times.begin(), times.end(), 0.0, 
-                [mean](double sum, double t) { return sum + (t - mean) * (t - mean); });
-            double stddev = std::sqrt(sum_of_squares / times.size());
-
-            std::cout << "Benchmark [" << b.name << "]:\n";
-            std::cout << "  Min: " << min_time << " ns\n";
-            std::cout << "  Max: " << max_time << " ns\n";
-            std::cout << "  Mean: " << mean << " ns\n";
-            std::cout << "  Std Dev: " << stddev << " ns\n";
-        }
-    }
-};
-
-#define EKO_BENCHMARK(name, func, iters) \
-    static void _benchmark_##name() { func; } \
-    static int _register_##name = (BenchmarkRunner::instance().registerBenchmark(#name, _benchmark_##name, iters), 0);
-
-// Example benchmark functions
-void example1() {
-    volatile int x = 0;
-    for (int i = 0; i < 1000; ++i) x += i;
-}
-
-void example2() {
-    volatile int y = 1;
-    for (int i = 0; i < 1000; ++i) y *= 2;
-}
-
-EKO_BENCHMARK(Example_Addition, example1(), 1000)
-EKO_BENCHMARK(Example_Multiplication, example2(), 1000)
-
-int main() {
-    BenchmarkRunner::instance().runAll();
-    return 0;
-}
-*/
-
-
-/*
-#include <iostream>
-#include <chrono>
-#include <vector>
-#include <algorithm>
-#include <numeric>
-
-class State {
-public:
-    // Constructor: set up 'count' and reserve space in durations
-    explicit State(int n) : count(n)
-    {
-        durations.reserve(n);
-    }
-
-    // Proxy object that measures the time of a single loop iteration
-    struct TimerProxy {
-        // Start timing as soon as this is constructed
-        TimerProxy(std::vector<double>& dur)
-            : start(std::chrono::high_resolution_clock::now()), durationsRef(dur)
-        {
-        }
-
-        // Stop timing in the destructor, which is called automatically
-        // when the iteration scope ends
-        ~TimerProxy()
-        {
-            auto end = std::chrono::high_resolution_clock::now();
-            auto elapsedUs =
-                std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
-            durationsRef.push_back(static_cast<double>(elapsedUs));
-        }
-
-    private:
-        std::chrono::time_point<std::chrono::high_resolution_clock> start;
-        std::vector<double>& durationsRef;
-    };
-
-    // Custom iterator for range-based for
-    class Iterator {
-    public:
-        Iterator(int index, State& s) : idx(index), stateRef(s) {}
-
-        // Compare index to end
-        bool operator!=(const Iterator& other) const {
-            return idx != other.idx;
-        }
-
-        // Advance the iterator
-        Iterator& operator++() {
-            ++idx;
-            return *this;
-        }
-
-        // Dereference: create and return a TimerProxy object
-        // Each iteration in the loop will construct a TimerProxy
-        TimerProxy operator*() {
-            return TimerProxy(stateRef.durations);
-        }
-
-    private:
-        int idx;
-        State& stateRef;
-    };
-
-    // Begin and end methods for range-based for
-    Iterator begin() { return Iterator(0, *this); }
-    Iterator end()   { return Iterator(count, *this); }
-
-    // Print timing statistics
-    void printStats() const
-    {
-        if (durations.empty()) {
-            std::cout << "No iterations recorded.\n";
-            return;
-        }
-
-        // Find min and max
-        auto minmax = std::minmax_element(durations.begin(), durations.end());
-        double minVal = *minmax.first;
-        double maxVal = *minmax.second;
-
-        // Compute the average
-        double sumVal = std::accumulate(durations.begin(), durations.end(), 0.0);
-        double meanVal = sumVal / durations.size();
-
-        std::cout << "Min: " << minVal << " microseconds\n"
-                  << "Max: " << maxVal << " microseconds\n"
-                  << "Avg: " << meanVal << " microseconds\n";
-    }
-
-private:
-    int count;
-    std::vector<double> durations;
-};
-
-int main()
-{
-    // Example: measure 5 iterations
-    State state(5);
-
-    // Each iteration automatically gets timed by State’s TimerProxy
-    for (auto measure : state)
-    {
-        // -------------------------
-        // Code you want to measure
-        // -------------------------
-        volatile int x = 0;
-        for (int i = 0; i < 1000000; ++i) {
-            x += i;
-        }
-        // 'measure' goes out of scope here,
-        // so TimerProxy's destructor records the time
-    }
-
-    // Print results
-    state.printStats();
-
-    return 0;
-}
-*/
-#include "test.h"
-#include <cmath> // for sin
-
-static void escape(void *p)
-{
-    asm volatile("" : : "g"(p) : "memory");
-} 
-
-static void clobber()
-{
-    asm volatile("" : :  : "memory");
-} 
-
-
-// A sample user function that we want to benchmark
-void MyTrigBenchmarkaa(Abench::State& state) {
-    for (auto _ : state) {
-        volatile double sum = 0.0;
-        for (int i = 0; i < 100; ++i) {
-            sum += std::sin(i * 0.001);
-        }
-
-    }
-}
-
-// A sample user function that we want to benchmark
-void MyTrigBenchmark(Abench::State& state) {
-    for (auto _ : state) {
-        volatile double sum = 0.0;
-        for (int i = 0; i < 100; ++i) {
-            sum += std::sin(i * 0.001);
-        }
-    }
-}
-
-
-
-
-
-// Register it via the macro
-BENCHMARK(MyTrigBenchmark)->Iterations(1000);
-// Register it via the macro
-BENCHMARK(MyTrigBenchmarkaa)->Name("Aaaa Test")->Iterations(1000);
-
-int main() {
-    // This runs all registered benchmarks
-    Abench::Initialize();
-    Abench::RunAll();
-    return 0;
-}
-
-
-
-#endif // ABENCHMARK_H
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef ABENCHMARK_H
 #define ABENCHMARK_H
 
@@ -762,7 +83,9 @@ class State {
    */
   explicit State(int n)
       : iteration_count_(n), manual_(false) {
-    durations_ns_.reserve(n);
+    stat_.min_ns = std::numeric_limits<double>::max();
+    stat_.max_ns = 0.0;
+    stat_.mean_ns = 0.0;
   }
 
   /**
@@ -770,10 +93,10 @@ class State {
    * @brief RAII object that measures time of a single iteration if manual mode is not enabled.
    */
   struct TimerProxy {
-    TimerProxy(std::vector<double>& durations,
+    TimerProxy(Stats& stat,
                bool manual,
                CLOCK_TYPE& start_manual_ref)
-        : durations_ns_(durations),
+        : stat_(stat),
           manual_mode_(manual),
           start_manual_(start_manual_ref) {
       start_ = GET_TIME();
@@ -783,7 +106,9 @@ class State {
       CLOCK_TYPE end_time = GET_TIME();
       if (!manual_mode_) {
         double ns = CALCULATE_TIME_NS(end_time, start_);
-        durations_ns_.push_back(ns);
+        if (ns < stat_.min_ns) stat_.min_ns = ns;
+        if (ns > stat_.max_ns) stat_.max_ns = ns;
+        stat_.mean_ns += ns;
       } else {
         // If manual mode, store start time for user to explicitly stop later
         start_manual_ = start_;
@@ -791,7 +116,7 @@ class State {
     }
 
    private:
-    std::vector<double>& durations_ns_;
+    Stats& stat_;
     bool manual_mode_;
     CLOCK_TYPE start_;
     CLOCK_TYPE& start_manual_;
@@ -816,7 +141,7 @@ class State {
     }
 
     TimerProxy operator*() {
-      return TimerProxy(state_.durations_ns_,
+      return TimerProxy(state_.stat_,
                         state_.manual_,
                         state_.start_manual_);
     }
@@ -844,43 +169,46 @@ class State {
   void StopTimer() {
     CLOCK_TYPE end_time = GET_TIME();
     double ns = CALCULATE_TIME_NS(end_time, start_manual_);
-    durations_ns_.push_back(ns);
+    if (ns < stat_.min_ns) stat_.min_ns = ns;
+    if (ns > stat_.max_ns) stat_.max_ns = ns;
+    stat_.mean_ns += ns;
   }
 
   /**
    * @brief Compute min, max, mean of the recorded durations.
    * @return Stats struct with min_ns, max_ns, mean_ns
    */
-  Stats getStats() const {
-    Stats s = {0.0, 0.0, 0.0};
-    if (durations_ns_.empty()) {
-      return s;
-    }
-
-    // Min/Max
-    std::pair<std::vector<double>::const_iterator,
-              std::vector<double>::const_iterator> mm
-        = std::minmax_element(durations_ns_.begin(), durations_ns_.end());
-    s.min_ns = *mm.first;
-    s.max_ns = *mm.second;
-
-    // Mean
-    double sum_val =
-        std::accumulate(durations_ns_.begin(), durations_ns_.end(), 0.0);
-    s.mean_ns = sum_val / durations_ns_.size();
-
-    return s;
+  Stats getStats() {
+    stat_.mean_ns /= GetIterations();
+    return stat_;
   }
 
   int GetIterations() const {
     return iteration_count_;
   }
 
+  //--------------------------------------------------------------------------
+  // Multi-dimensional Arg support
+  //--------------------------------------------------------------------------
+  void SetArgs(const std::vector<int>& args) {
+    currentArgs_ = args;
+  }
+
+  int range(size_t i) const {
+    if (i < currentArgs_.size()) {
+      return currentArgs_[i];
+    }
+    return -1; // out of range
+  }
+
  private:
   int iteration_count_;
   bool manual_;
-  std::vector<double> durations_ns_;
+  Stats stat_;
   CLOCK_TYPE start_manual_;
+
+  // For multi-dimensional arguments
+  std::vector<int> currentArgs_;
 };
 
 /**
@@ -890,7 +218,9 @@ class State {
 class Benchmark {
  public:
   explicit Benchmark(const std::string& name)
-      : name_(name), iterations_(BENCH_NUMBER_OF_RUN) {}
+      : name_(name), iterations_(BENCH_NUMBER_OF_RUN),
+        rangeMultiplier_(2) // default multiplier
+  {}
 
   Benchmark* Name(const std::string& n) {
     name_ = n;
@@ -902,6 +232,65 @@ class Benchmark {
     return this;
   }
 
+  //--------------------------------------------------------------------------
+  // Google Benchmark–style argument methods
+  //--------------------------------------------------------------------------
+
+  /**
+   * @brief Single scalar argument => one-dimensional set
+   */
+  Benchmark* Arg(int a) {
+    argSets_.push_back({a});
+    return this;
+  }
+
+  /**
+   * @brief Multi-argument set => e.g. Args({32, 64}) means two-dim arguments
+   */
+  Benchmark* Args(const std::initializer_list<int>& list) {
+    argSets_.push_back(std::vector<int>(list));
+    return this;
+  }
+
+  /**
+   * @brief Range-based arguments. Repeatedly multiply `start` by `rangeMultiplier_`
+   * until we exceed `limit`.
+   *
+   * Example: If start=8, limit=1024, rangeMultiplier_=2,
+   * we get 8,16,32,64,128,256,512,1024
+   */
+  Benchmark* Range(int start, int limit) {
+    int val = start;
+    while (val <= limit) {
+      Arg(val); // pushes {val}
+      val *= rangeMultiplier_;
+    }
+    return this;
+  }
+
+  /**
+   * @brief For enumerating a dense sequence [start..limit] in increments of step.
+   * Example: DenseRange(1,4) => 1,2,3,4
+   */
+  Benchmark* DenseRange(int start, int limit, int step = 1) {
+    for (int i = start; i <= limit; i += step) {
+      Arg(i);
+    }
+    return this;
+  }
+
+  /**
+   * @brief Set the multiplier used by Range().
+   */
+  Benchmark* RangeMultiplier(int mul) {
+    rangeMultiplier_ = (mul > 1) ? mul : 2; // avoid nonsense
+    return this;
+  }
+
+  //--------------------------------------------------------------------------
+  // Accessors
+  //--------------------------------------------------------------------------
+
   const std::string& GetName() const {
     return name_;
   }
@@ -910,12 +299,25 @@ class Benchmark {
     return iterations_;
   }
 
+  // Return all argument sets (possibly empty if user never sets them)
+  const std::vector<std::vector<int>>& GetAllArgSets() const {
+    return argSets_;
+  }
+
+  bool HasArgSets() const {
+    return !argSets_.empty();
+  }
+
   virtual void Run(State& st) = 0;
   virtual ~Benchmark() {}
 
  private:
   std::string name_;
   size_t iterations_;
+
+  // Arg data
+  std::vector<std::vector<int>> argSets_;
+  int rangeMultiplier_;
 };
 
 // Function pointer signature
@@ -1188,7 +590,6 @@ inline void PrintTable(const std::vector<BenchResult>& results) {
   // Print rows
   for (size_t i = 0; i < table.size(); ++i) {
     const Row& row = table[i];
-
     std::cout
       << std::left  << std::setw(static_cast<int>(maxNameWidth)) << row.name
       << std::string(pad, ' ')
@@ -1212,23 +613,58 @@ inline void PrintTable(const std::vector<BenchResult>& results) {
 inline void RunAll() {
   BenchmarkRegister* instance = BenchmarkRegister::GetInstance();
   std::vector<BenchResult> results;
-  results.reserve(instance->benchmarks_.size());
+
+  // In the worst case, each benchmark can have many arg sets
+  // Reserve something, though it's not a big deal if it re-allocates
+  results.reserve(instance->benchmarks_.size() * 4);
 
   // 1) Run each benchmark, gather stats
-  for (size_t i = 0; i < instance->benchmarks_.size(); ++i) {
-    Benchmark* bench = instance->benchmarks_[i].get();
-    State st(static_cast<int>(bench->GetIterations()));
-    bench->Run(st);
+  for (auto& benchPtr : instance->benchmarks_) {
+    Benchmark* bench = benchPtr.get();
 
-    Stats s = st.getStats();
-    BenchResult r;
-    r.name       = bench->GetName();
-    r.iterations = bench->GetIterations();
-    r.min_ns     = s.min_ns;
-    r.max_ns     = s.max_ns;
-    r.mean_ns    = s.mean_ns;
+    // If the benchmark has argument sets:
+    if (bench->HasArgSets()) {
+      const auto& allArgSets = bench->GetAllArgSets();
+      for (const auto& argSet : allArgSets) {
+        // Create State
+        State st(static_cast<int>(bench->GetIterations()));
+        st.SetArgs(argSet);
 
-    results.push_back(r);
+        // Run the user function
+        bench->Run(st);
+        Stats s = st.getStats();
+
+        // Build a result record, e.g. "Name/2" or "Name/2/4"
+        std::ostringstream oss;
+        oss << bench->GetName();
+        for (int v : argSet) {
+          oss << "/" << v;
+        }
+
+        BenchResult r;
+        r.name       = oss.str();
+        r.iterations = bench->GetIterations();
+        r.min_ns     = s.min_ns;
+        r.max_ns     = s.max_ns;
+        r.mean_ns    = s.mean_ns;
+
+        results.push_back(r);
+      }
+    } else {
+      // No arguments => old single-run approach
+      State st(static_cast<int>(bench->GetIterations()));
+      bench->Run(st);
+      Stats s = st.getStats();
+
+      BenchResult r;
+      r.name       = bench->GetName();
+      r.iterations = bench->GetIterations();
+      r.min_ns     = s.min_ns;
+      r.max_ns     = s.max_ns;
+      r.mean_ns    = s.mean_ns;
+
+      results.push_back(r);
+    }
   }
 
   // 2) Print dynamic table to stdout
@@ -1271,7 +707,16 @@ inline void RunAll() {
 
 /**
  * @brief Create and register a FunctionBenchmark.
- * Usage: BENCHMARK(MyFunction)->Name("Test")->Iterations(5);
+ * Usage:
+ *   BENCHMARK(MyFunction)
+ *      ->Name("Test")
+ *      ->Iterations(5)
+ *      ->Arg(1)
+ *      ->Arg(2)
+ *      ->Range(1,1024)
+ *      ->DenseRange(0,10)
+ *      ->Args({32, 64})
+ *      ->RangeMultiplier(4);
  */
 #define BENCHMARK(func) \
   static ::Abench::Benchmark* BENCHMARK_PRIVATE_NAME(__LINE__) BENCHMARK_UNUSED = \
@@ -1298,180 +743,117 @@ inline void RunAll() {
 
 
 
-#include <algorithm>
-#include <cmath>
-#include <cstdlib>
-#include <iostream>
-#include <random>
-#include <string>
-#include <vector>
 
-// Include your ABenchmark header (adjust path as needed)
+
+
+
+
+
+
+
 #include "ABenchmark.h"
+#include <iostream>
+#include <vector>
+#include <thread>
+#include <chrono>
 
-/******************************************************************************
- * 1) Integer arithmetic (auto-timed)
- ******************************************************************************/
-static void BM_IntArithmetic(Abench::State& state) {
-  for (auto _ : state) {
-    volatile int sum = 0;
-    for (int i = 0; i < 1000000; ++i) {
-      sum += (i * 2) - (i / 2);
+//------------------------------------------------------------------------------
+// Example 1: Automatic Timing - Summation of a vector
+//------------------------------------------------------------------------------
+void BM_SumVector(Abench::State& st) {
+  // Use the first argument (dimension 0) as the vector size
+  int size = st.range(0);
+
+  // Possibly a second argument if specified
+  int secondVal = st.range(1); // -1 if not set
+
+  // Prepare a vector of 'size' elements
+  std::vector<int> data(size, 1);
+
+  // Range-based for automatically times each iteration
+  for (auto _ : st) {
+    long long sum = 0;
+    for (int x : data) {
+      sum += x;
     }
+
+    // Just to simulate using the second argument, we might do:
+    // sum += secondVal;  // If secondVal != -1
   }
 }
-BENCHMARK(BM_IntArithmetic)->Name("IntArithmetic")->Iterations(10);
 
-/******************************************************************************
- * 2) Floating-point math (auto-timed)
- ******************************************************************************/
-static void BM_FloatMath(Abench::State& state) {
-  for (auto _ : state) {
-    volatile double val = 0.0;
-    for (int i = 0; i < 500000; ++i) {
-      val += std::sqrt(i) * std::sin(i) + std::cos(i / 100.0);
-    }
+//------------------------------------------------------------------------------
+// Example 2: Manual Timing - Sleep for demonstration
+//------------------------------------------------------------------------------
+void BM_ManualSleep(Abench::State& st) {
+  for (int i = 0; i < st.GetIterations(); ++i) {
+    st.StartTimer();
+    // Simulate work with a 1 ms sleep
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    st.StopTimer();
   }
 }
-BENCHMARK(BM_FloatMath)->Name("FloatMath")->Iterations(10);
 
-/******************************************************************************
- * 3) Memory Allocations (auto-timed)
- ******************************************************************************/
-static void BM_MemoryAllocs(Abench::State& state) {
-  for (auto _ : state) {
-    for (int i = 0; i < 100000; ++i) {
-      char* ptr = new char[64];
-      ptr[0] = static_cast<char>(i);
-      delete[] ptr;
-    }
+//------------------------------------------------------------------------------
+// Example 3: Automatic Timing but trivial work
+//------------------------------------------------------------------------------
+void BM_Trivial(Abench::State& st) {
+  for (auto _ : st) {
+    // No real work, just a placeholder
+    int x = 42;
+    (void)x; // avoid unused variable warning
   }
 }
-BENCHMARK(BM_MemoryAllocs)->Name("MemoryAllocs")->Iterations(10);
 
-/******************************************************************************
- * 4) String manipulation (auto-timed)
- ******************************************************************************/
-static void BM_StringManip(Abench::State& state) {
-  std::mt19937 rng(12345);
-  std::uniform_int_distribution<int> dist(0, 25);
+//------------------------------------------------------------------------------
+// Register Benchmarks
+//------------------------------------------------------------------------------
+/**
+ * 1) Demonstrates Arg, Range, DenseRange, RangeMultiplier, and multi-argument sets
+ */
+BENCHMARK(BM_SumVector)
+    ->Name("SumVector")
+    ->Iterations(50)
+    // Single Arg => st.range(0) = 1000
+    ->Arg(1000)
+    // Range from 8 to 64, multiplying by default=2: 8,16,32,64
+    ->Range(8, 64)
+    // DenseRange from 1..4 => 1,2,3,4
+    ->DenseRange(1, 4,5)
+    // Example of RangeMultiplier usage:
+    ->RangeMultiplier(4)
+    // Another Range from 16..256 but in powers of 4 => 16,64,256
+    ->Range(16, 256)
+    // multi-dimensional argument => st.range(0)=9999, st.range(1)=5555
+    ->Args({9999, 5555,5, 4});
 
-  for (auto _ : state) {
-    std::string base("BenchmarkTest");
-    for (int i = 0; i < 50000; ++i) {
-      std::string tmp;
-      for (int j = 0; j < 5; ++j) {
-        tmp.push_back(static_cast<char>('a' + dist(rng)));
-      }
-      base += tmp;
-      if (base.size() > 10000) {
-        base.resize(100);
-      }
-    }
-  }
-}
-BENCHMARK(BM_StringManip)->Name("StringManip")->Iterations(10);
+/**
+ * 2) Demonstrates manual StartTimer/StopTimer
+ */
+BENCHMARK(BM_ManualSleep)
+    ->Name("ManualSleep")
+    ->Iterations(10);
 
-/******************************************************************************
- * 5) Sorting a large vector (manual-timed), excluding data setup
- ******************************************************************************/
-static void BM_SortLargeVector(Abench::State& state) {
-  std::vector<int> data(2000000);  // 2 million elements
-  std::mt19937 rng(54321);
-  std::uniform_int_distribution<int> dist(0, 1000000);
-  for (auto& d : data) {
-    d = dist(rng);
-  }
+/**
+ * 3) Very trivial auto-timed function
+ */
+BENCHMARK(BM_Trivial)
+    ->Name("Trivial")
+    ->Iterations(100);
 
-  for (int i = 0; i < state.GetIterations(); ++i) {
-    std::vector<int> temp = data;
-
-    state.StartTimer();
-    std::sort(temp.begin(), temp.end());
-    state.StopTimer();
-  }
-}
-BENCHMARK(BM_SortLargeVector)->Name("SortLargeVector")->Iterations(5);
-
-/******************************************************************************
- * 6) Mixed work (auto-timed)
- ******************************************************************************/
-static void BM_MixedWork(Abench::State& state) {
-  for (auto _ : state) {
-    // Some integer arithmetic
-    volatile int int_sum = 0;
-    for (int i = 0; i < 50000; ++i) {
-      int_sum += i;
-    }
-
-    // Some floating point
-    volatile double float_val = 0.0;
-    for (int i = 1; i < 50000; ++i) {
-      float_val += std::log(static_cast<double>(i));
-    }
-
-    // A small memory allocation
-    char* p = new char[1024];
-    p[0] = 'x';
-    delete[] p;
-  }
-}
-BENCHMARK(BM_MixedWork)->Name("MixedWork")->Iterations(10);
-
-/******************************************************************************
- * 7) Manual timing INSIDE a range-based loop
- *    Demonstrates measuring PART of each iteration while ignoring the rest.
- ******************************************************************************/
-static void BM_ManualInsideRange(Abench::State& state) {
-  // This approach can be useful if you only want to measure
-  // *some* code inside each iteration, while ignoring other code.
-
-  for (auto _ : state) {
-    // 1) Some code you DON'T want to measure
-    volatile int outsideWork = 0;
-    for (int i = 0; i < 1000; ++i) {
-      outsideWork += i;
-    }
-
-    // 2) Now measure just this part
-    state.StartTimer();
-    {
-      // For instance, do a mini memory allocation
-      char* ptr = new char[10000];
-      for (int i = 0; i < 10000; ++i) {
-        ptr[i] = static_cast<char>(i & 0xFF);
-      }
-      delete[] ptr;
-    }
-    state.StopTimer();
-
-    // 3) Some extra work again outside the timed region
-    volatile double extra = 0;
-    for (int i = 0; i < 1000; ++i) {
-      extra += std::sqrt(i);
-    }
-  }
-}
-BENCHMARK(BM_ManualInsideRange)->Name("ManualInsideRange")->Iterations(5);
-
-/******************************************************************************
- * MAIN FUNCTION
- * Demonstrate how to set up the environment, optionally specify CSV or JSON
- * output, and run all benchmarks. The user can customize iteration counts
- * above.
- ******************************************************************************/
+//------------------------------------------------------------------------------
+// main()
+//------------------------------------------------------------------------------
 int main() {
-  // (Optional) Pin the thread or any environment setup
+  // Optional: set output format, e.g. CSV => "results.csv"
+  Abench::SetOutputFormat("csv", "results.csv");
+
+  // Pin this thread to CPU #2 (as in your Abench's Initialize())
   Abench::Initialize();
 
-  // Optionally, produce CSV/JSON output in addition to stdout table:
-   Abench::SetOutputFormat("csv",  "benchmark_results.csv");
-
-  // Now run all registered benchmarks.
+  // Run all benchmarks
   Abench::RunAll();
 
   return 0;
 }
-
-
 
